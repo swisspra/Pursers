@@ -138,17 +138,35 @@ def test_executor_snapshot_returns_copies(tmp_path):
 
 
 @pytest.mark.parametrize('prior_lifecycle', ['ready', 'draining'])
-def test_verified_process_loss_advances_incarnation_once(tmp_path, prior_lifecycle):
+def test_verified_process_loss_waits_for_lease_release_then_advances_once(tmp_path, prior_lifecycle):
     template, boards, members, _ = fixture()
     store = fleet_executor.ExecutorStore(tmp_path/'executor.sqlite3')
     store.connection.execute(
-        "INSERT INTO seats VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO seats (seat_id, board_id, template_id, template_digest, principal_id, "
+        "identity_id, state_id, state_dir_id, generation, lifecycle, process_ref, "
+        "last_mutation, last_failure) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         ('seat','a','t','a'*64,'p',None,None,None,7,prior_lifecycle,'pid:old',
          NOW.timestamp()-60,None),
     )
     store.connection.commit()
     services = SimpleNamespace(inspect=lambda *_: fleet_executor.ServiceObservation(
         True, False, False, True, None))
+    observer = observer_api()['LocalFleetObserver'](
+        {'t':template}, services, store.observation_snapshot(),
+        {'t':{'board_id':'a','provider':'worker'}},
+        recover=store.reconcile_unexpected_stop,
+    )
+    boards['a']['agents'][0]['lease_expires_at']=(NOW+timedelta(minutes=2)).isoformat()
+    observation, _, _ = observer.collect(['a','b'], boards, members, NOW,
+        {'worker':{'status':'healthy','latency_ms':1}}, {})
+    row = observation['executor_seats'][0]
+    assert (row['generation'], row['lifecycle'], row['reason_code']) == (
+        7, 'unhealthy', 'unexpected_process_loss_live_lease')
+    assert row['process_absent_verified'] is True
+    assert store.seat('seat')['generation'] == 7
+    # No elapsed timestamp alone releases a lease; a later authoritative
+    # snapshot with no holder record does permit the existing exact-incarnation CAS.
+    del boards['a']['agents'][0]['lease_expires_at']
     observer = observer_api()['LocalFleetObserver'](
         {'t':template}, services, store.observation_snapshot(),
         {'t':{'board_id':'a','provider':'worker'}},

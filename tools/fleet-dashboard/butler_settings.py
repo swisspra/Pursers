@@ -617,27 +617,31 @@ def prepare_autonomous_butler_config(
         raise ButlerSettingsError("budget fields are invalid")
     if budget["period"] not in {"hour", "day", "month"}:
         raise ButlerSettingsError("budget.period is invalid")
-    clean_budget = {
-        "period": budget["period"],
-        "max_tokens": _bounded_integer(
-            budget["max_tokens"], "budget.max_tokens", 0, 1_000_000_000
-        ),
-        "max_cost_microunits": _bounded_integer(
-            budget["max_cost_microunits"],
-            "budget.max_cost_microunits",
-            0,
-            1_000_000_000_000,
-        ),
-        "max_external_calls": _bounded_integer(
-            budget["max_external_calls"], "budget.max_external_calls", 0, 1_000_000
-        ),
-    }
-    envelope_budget = envelope.get("max_budget")
-    if not isinstance(envelope_budget, Mapping) or any(
-        clean_budget[name] > envelope_budget.get(name, -1)
-        for name in ("max_tokens", "max_cost_microunits", "max_external_calls")
+    clean_budget = {"period": budget["period"]}
+    for name, maximum in (
+        ("max_tokens", 1_000_000_000),
+        ("max_cost_microunits", 1_000_000_000_000),
+        ("max_external_calls", 1_000_000),
     ):
+        clean_budget[name] = (
+            None if budget[name] is None
+            else _bounded_integer(budget[name], f"budget.{name}", 0, maximum)
+        )
+    envelope_budget = envelope.get("max_budget")
+    if not isinstance(envelope_budget, Mapping):
         raise ButlerSettingsError("budget exceeds the immutable envelope")
+    for name, maximum in (
+        ("max_tokens", 1_000_000_000),
+        ("max_cost_microunits", 1_000_000_000_000),
+        ("max_external_calls", 1_000_000),
+    ):
+        if name not in envelope_budget:
+            raise ButlerSettingsError("budget exceeds the immutable envelope")
+        cap = envelope_budget[name]
+        if cap is not None:
+            cap = _bounded_integer(cap, f"envelope.max_budget.{name}", 0, maximum)
+            if clean_budget[name] is None or clean_budget[name] > cap:
+                raise ButlerSettingsError("budget exceeds the immutable envelope")
     if clean_budget["period"] != envelope_budget.get("period"):
         raise ButlerSettingsError("budget period must match the immutable envelope")
     requested_connectors = request["connectors"]

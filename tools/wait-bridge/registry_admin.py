@@ -139,6 +139,7 @@ def validate_registry(document: Any) -> dict[str, Any]:
             "delivery_policy",
             "delivery_policy_group",
             "delivery_policy_activation",
+            "final_validation_delivery",
         }
         if (
             not isinstance(entry, dict)
@@ -209,6 +210,12 @@ def validate_registry(document: Any) -> dict[str, Any]:
                 entry["delivery_policy_group"] = delivery_group_name(entry["delivery_policy_group"])
             except ValueError as exc:
                 raise RegistryError(str(exc)) from exc
+        if "final_validation_delivery" in entry:
+            mode = entry["final_validation_delivery"]
+            if type(mode) is not str or mode not in {"require_pass", "draft_with_report"}:
+                raise RegistryError(
+                    f"project {name!r} final_validation_delivery must be require_pass or draft_with_report"
+                )
         if "delivery_policy_activation" in entry:
             try:
                 entry["delivery_policy_activation"] = parse_delivery_policy_activation(

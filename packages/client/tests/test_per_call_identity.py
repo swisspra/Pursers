@@ -941,6 +941,7 @@ async def test_review_lease_calls_carry_the_seat_identity(monkeypatch) -> None:
     await board.ticket_review_claim("TK-review")
     await board.lease_renew("TK-review")
     await board.ticket_review_release("TK-review", reason="handoff")
+    await board.ticket_unclaim("TK-work")
     await board.dispatch_my_offers()
     await board.ticket_list(status="submitted", review_unclaimed_only=True)
 
@@ -962,6 +963,10 @@ async def test_review_lease_calls_carry_the_seat_identity(monkeypatch) -> None:
             },
         ),
         (
+            "ticket_unclaim",
+            {"agent_name": "env-default", "ticket_id": "TK-work"},
+        ),
+        (
             "dispatch_my_offers",
             {"agent_name": "env-default"},
         ),
@@ -974,6 +979,7 @@ async def test_review_lease_calls_carry_the_seat_identity(monkeypatch) -> None:
                 "limit": 100,
                 "review_unclaimed_only": True,
                 "status": "submitted",
+                "view": "work",
             },
         ),
     ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -1050,6 +1051,65 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         stored = await self.call("board_state_get", key="coordinator_intake")
         self.assertEqual(stored.structured_content["state"]["value"], replacement)
 
+    async def test_project_registry_delivery_mode_change_requires_admin(self):
+        def registry(mode="require_pass", *, include_mode=True):
+            project = {"board_id": "pursers", "work_dir": "/repo/api", "status": "active"}
+            if include_mode:
+                project["final_validation_delivery"] = mode
+            return json.dumps({"schema_version": 1, "projects": {"api": project}})
+        self.principal = self.admin
+        await self.call("board_state_update", agent_name="admin-agent", key="project_registry",
+                         value=registry(), expected_absent=True)
+
+        self.principal = self.worker
+        with self.assertRaisesRegex(ToolError, "board role not authorized"):
+            await self.call("board_state_update", agent_name="worker-agent", key="project_registry",
+                             value=registry("draft_with_report"))
+        current = json.loads(self.service.load("pursers")["state"]["project_registry"]["value"])
+        self.assertEqual(current["projects"]["api"]["final_validation_delivery"], "require_pass")
+
+        # Ordinary metadata refreshes retain existing write permissions when
+        # the per-project delivery mode itself is unchanged.
+        current["projects"]["api"]["display_name"] = "API"
+        self.principal = self.worker
+        refreshed_metadata = await self.call(
+            "board_state_update", agent_name="worker-agent", key="project_registry",
+            value=json.dumps(current),
+        )
+        self.assertFalse(refreshed_metadata.is_error)
+
+        # Only the explicit mode transition requires an administrator.
+        self.principal = self.admin
+        updated = await self.call("board_state_update", agent_name="admin-agent",
+                                  key="project_registry", value=registry("draft_with_report"))
+        self.assertFalse(updated.is_error)
+        self.principal = self.worker
+        with self.assertRaisesRegex(ToolError, "board role not authorized"):
+            await self.call("board_state_update", agent_name="worker-agent", key="project_registry",
+                            value=registry("require_pass"))
+        self.assertEqual(json.loads(self.service.load("pursers")["state"]["project_registry"]["value"])
+                         ["projects"]["api"]["final_validation_delivery"], "draft_with_report")
+        self.principal = self.intake_runtime
+        joined = await self.call("board_join", agent_name="intake-coordinator-runtime",
+                                 role="coordinator")
+        self.assertFalse(joined.is_error)
+        with self.assertRaisesRegex(ToolError, "board:intake authorization permits only"):
+            await self.call("board_state_update", agent_name="intake-coordinator-runtime",
+                            key="project_registry", value=registry("draft_with_report"))
+        self.assertEqual(json.loads(self.service.load("pursers")["state"]["project_registry"]["value"])
+                         ["projects"]["api"]["final_validation_delivery"], "draft_with_report")
+        self.principal = self.worker
+        with self.assertRaisesRegex(ToolError, "board role not authorized"):
+            await self.call("board_state_update", agent_name="worker-agent", key="project_registry",
+                            value=registry(include_mode=False))
+        self.principal = self.admin
+        with self.assertRaisesRegex(ToolError, "must be require_pass or draft_with_report"):
+            await self.call("board_state_update", agent_name="admin-agent", key="project_registry",
+                            value=registry("maybe"))
+        refreshed = await self.call("board_state_update", agent_name="admin-agent",
+                                    key="project_registry", value=registry("draft_with_report"))
+        self.assertFalse(refreshed.is_error)
+
     async def test_identical_coordinator_refresh_preserves_generation_fence(self):
         self.principal = self.coordinator
         value = '{"findings":[]}'
@@ -1629,7 +1689,7 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
             item for item in listed.structured_content["tickets"]
             if item["ticket_id"] == ticket_id
         )
-        self.assertEqual(summary["annotation_count"], 51)
+        self.assertEqual(summary["counts"]["annotations"], 51)
         self.assertNotIn("annotations", summary)
 
 

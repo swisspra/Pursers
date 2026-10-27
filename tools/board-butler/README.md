@@ -240,6 +240,10 @@ repository that resolves to batch or branch-only delivery without this flag stay
 unregistered with `delivery_setup_required`; it cannot silently use legacy
 per-ticket PR delivery.
 
+### Native workflow delivery runtime binding
+
+Native project workflows can bind the existing batch delivery engine without depending on a Sonar source declaration. `workflow_runtime.build_workflow_runtime(backend, project)` resolves the exact active Central registry project, its effective activated delivery policy, one approved connector runtime, the fleet-owned protected clone, and a private per-project durable ledger. It returns `(BatchDeliveryRuntime, compiled_policy)` for the controller to use with actual independently reviewed member evidence. It never fabricates validation or review evidence, and fails closed for missing or ambiguous routes, inactive policy, foreign clones, or unavailable connector capabilities. Existing connector policy gates, reservations, and unknown-outcome reconciliation remain in force. See [native workflow delivery binding](../../docs/butler-workflow-runtime.md).
+
 With `--source-intake-index-file /PATH/TO/private/source-intake-index.json`
 the resident runs Butler-managed intake. The configured Butler model (the
 `drafting` provider) decides when inputs change whether to pull, how many items, and
@@ -328,6 +332,24 @@ python3 tools/board-butler/board_butler.py \
   --refresh-seconds 60 \
   --once --dry-run
 ```
+
+## Verified fleet process-loss recovery
+
+Fleet observations distinguish productive capacity from reserved capacity. A
+service adapter's verified absence of the exact recorded process incarnation
+makes an unhealthy seat non-serving even while its work/review lease remains
+live. That seat still occupies host, role, and provider hard caps; it is not
+counted as productive capacity and is never stopped or replaced by stealing
+its lease. The observer reports `unexpected_process_loss_live_lease` until a
+current canonical board snapshot proves there is no live or unknown work/review
+holder. Expiry timestamps alone do not prove release. Missing or ambiguous
+identity/process evidence remains fail-closed and is not treated as known-dead.
+
+After canonical lease release, the observer uses the existing generation and
+process-reference CAS to reconcile that same authorized seat to stopped, then
+the bounded reconciler may start it under its existing readiness checks,
+backoff, durable receipts, and operation/seat caps. A lost process with no
+verified absence or exact incarnation match is not automatically resumed.
 
 ## Fleet service start, status, and emergency stop
 

@@ -754,6 +754,32 @@ def test_configurable_delivery_policy_hierarchy_survives_admin_and_doctor_roundt
         assert parsed['projects']['alpha']['delivery_policy_activation']['policy_revision'] == 'a' * 40
 
 
+def test_validation_delivery_mode_survives_admin_client_and_doctor_roundtrip():
+    import copy
+    import registry_doctor
+    from pursers_client.project_registry import parse_project_registry
+
+    raw = copy.deepcopy(INITIAL)
+    raw["projects"]["alpha"]["final_validation_delivery"] = "draft_with_report"
+    validated = registry_admin.validate_registry(raw)
+    client = parse_project_registry({"state": {"value": json.dumps(validated)}})
+    doctor = registry_doctor.parse_registry({"state": {"value": validated}})
+    for parsed in (validated, client, doctor):
+        assert parsed["projects"]["alpha"]["final_validation_delivery"] == "draft_with_report"
+
+
+def test_registry_loaders_reject_invalid_validation_delivery_mode():
+    import copy
+    import registry_doctor
+
+    raw = copy.deepcopy(INITIAL)
+    raw["projects"]["alpha"]["final_validation_delivery"] = "maybe"
+    with pytest.raises(registry_admin.RegistryError, match="final_validation_delivery"):
+        registry_admin.validate_registry(raw)
+    with pytest.raises(registry_doctor.DoctorError, match="final_validation_delivery"):
+        registry_doctor.parse_registry({"state": {"value": raw}})
+
+
 def test_registry_loaders_reject_malformed_delivery_activation():
     import copy
     import registry_doctor

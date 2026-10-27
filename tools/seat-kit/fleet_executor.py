@@ -306,6 +306,7 @@ class RegistryReadinessObservation:
     ready: bool = False
     selected_active_boards: tuple[str, ...] = ()
     reason_code: str | None = None
+    restart_eligible: bool = False
 
 
 class ServiceAdapter(Protocol):
@@ -462,6 +463,7 @@ class FileRegistryReadinessProvider:
                 raise PolicyError("registry_readiness_snapshot_invalid")
             expected_role = "reviewer" if template.role == "reviewer" else "member"
             expected_capabilities = dict(template.capabilities)
+            restarting_stale = False
             for selected_board in selected:
                 record = boards.get(selected_board)
                 if not isinstance(record, dict) or set(record) != {"seats"}:
@@ -474,11 +476,17 @@ class FileRegistryReadinessProvider:
                     return RegistryReadinessObservation(
                         True, reason_code="registry_membership_missing"
                     )
+                stale_restart = (
+                    seat.get("lifecycle_status") == "stale"
+                    and seat.get("lifecycle_reason") == "inactivity_threshold"
+                    and seat.get("restart_eligible") is True
+                )
+                restarting_stale |= stale_restart
                 if (
                     seat.get("principal_id") != template.principal_id
                     or seat.get("role") != template.role
                     or seat.get("membership_role") != expected_role
-                    or seat.get("lifecycle_status") != "active"
+                    or (seat.get("lifecycle_status") != "active" and not stale_restart)
                 ):
                     return RegistryReadinessObservation(
                         True, reason_code="registry_identity_mismatch"
@@ -494,7 +502,9 @@ class FileRegistryReadinessProvider:
                         True, reason_code="registry_capabilities_mismatch"
                     )
             return RegistryReadinessObservation(
-                True, True, tuple(selected), None
+                True, not restarting_stale, tuple(selected),
+                "registry_reactivation_pending" if restarting_stale else None,
+                restart_eligible=restarting_stale,
             )
         except (OSError, KeyError, TypeError, json.JSONDecodeError, PolicyError):
             return RegistryReadinessObservation(
@@ -579,6 +589,10 @@ class ExecutorStore:
         for column in ("identity_id", "state_id", "state_dir_id"):
             if column not in existing:
                 self.connection.execute(f"ALTER TABLE seats ADD COLUMN {column} TEXT")
+        if "reactivation_attempts" not in existing:
+            self.connection.execute(
+                "ALTER TABLE seats ADD COLUMN reactivation_attempts INTEGER NOT NULL DEFAULT 0"
+            )
 
     def operation(self, operation_id: str) -> tuple[str, str, str | None] | None:
         row = self.connection.execute(
@@ -649,7 +663,8 @@ class ExecutorStore:
         row = self.connection.execute(
             "SELECT board_id, template_id, template_digest, principal_id, "
             "identity_id, state_id, state_dir_id, generation, "
-            "lifecycle, process_ref, last_mutation, last_failure FROM seats WHERE seat_id = ?",
+            "lifecycle, process_ref, last_mutation, last_failure, reactivation_attempts "
+            "FROM seats WHERE seat_id = ?",
             (seat_id,),
         ).fetchone()
         if not row:
@@ -657,9 +672,38 @@ class ExecutorStore:
         keys = (
             "board_id", "template_id", "template_digest", "principal_id",
             "identity_id", "state_id", "state_dir_id", "generation",
-            "lifecycle", "process_ref", "last_mutation", "last_failure",
+            "lifecycle", "process_ref", "last_mutation", "last_failure", "reactivation_attempts",
         )
-        return dict(zip(keys, row, strict=True))
+        record = dict(zip(keys, row, strict=True))
+        record["reactivation_exhausted"] = record["reactivation_attempts"] >= 3
+        return record
+
+    def reserve_reactivation(self, seat_id: str, generation: int) -> None:
+        """Bound a startup episode independently of operation IDs/incarnations."""
+        with self.connection:
+            changed = self.connection.execute(
+                "UPDATE seats SET reactivation_attempts = reactivation_attempts + 1 "
+                "WHERE seat_id = ? AND generation = ? AND reactivation_attempts < 3",
+                (seat_id, generation),
+            ).rowcount
+        if changed != 1:
+            raise PolicyError("registry_reactivation_exhausted")
+
+    def confirm_registry_ready(
+        self, seat_id: str, *, expected_generation: int,
+        expected_process_ref: str, template_digest: str,
+    ) -> dict[str, Any] | None:
+        """Reset only after a verified live, all-board active observation."""
+        if not expected_process_ref:
+            return None
+        with self.connection:
+            changed = self.connection.execute(
+                "UPDATE seats SET reactivation_attempts = 0 WHERE seat_id = ? "
+                "AND generation = ? AND process_ref = ? AND template_digest = ? "
+                "AND reactivation_attempts > 0",
+                (seat_id, expected_generation, expected_process_ref, template_digest),
+            ).rowcount
+        return self.seat(seat_id) if changed == 1 else None
 
     def observation_snapshot(self) -> dict[str, dict[str, Any]]:
         """Return detached seat evidence through the supported store interface."""
@@ -954,7 +998,8 @@ class SystemdUserAdapter:
             "--no-pager",
         )
         if result.returncode != 0:
-            return ServiceObservation(unit_exists, False, False, identity)
+            # A matching unit file does not prove that its process is stopped.
+            return ServiceObservation(True, False, False, False)
         try:
             properties = self._show_properties(result.stdout)
         except ValueError:
@@ -993,6 +1038,12 @@ class SystemdUserAdapter:
         running = active in {"active", "activating"}
         ready = active == "active" and sub == "running" and pid.isdigit() and int(pid) > 0
         process_ref = None
+        if not running:
+            identity = (
+                identity and load == "loaded" and active in {"inactive", "failed"}
+                and sub in {"dead", "failed"} and pid == "0"
+                and not properties["ControlGroup"]
+            )
         if running or ready:
             start_ticks = (
                 self._process_identity(int(pid), template, properties["ControlGroup"])
@@ -1181,12 +1232,15 @@ class LaunchdUserAdapter:
             pass
         result = self._run("print", self._target(seat_id))
         if result.returncode != 0:
-            return ServiceObservation(exists, False, False, identity)
+            # A failed print cannot establish absence, even with a valid plist.
+            return ServiceObservation(True, False, False, False)
         fields = self._print_fields(result.stdout)
         state = fields.get("state")
         pid = fields.get("pid")
         running = state == "running"
         identity = identity and self._loaded_identity_matches(result.stdout, template)
+        if not running:
+            identity = identity and state in {"stopped", "waiting", "not running", "exited"} and pid in {None, "0"}
         ready = running and pid is not None and pid.isdigit() and int(pid) > 0 and identity
         process_ref = (
             f"launchd:{self._label(seat_id)}:{pid}" if ready and pid is not None else None
@@ -1689,7 +1743,24 @@ class FleetExecutor:
         if action == "start":
             if observation.exists and not observation.identity_verified:
                 raise PolicyError("process_identity_unknown")
-            self._check_registry_readiness(board_id, seat_id, template)
+            registry = self.readiness.observe(board_id, seat_id, template)
+            restarting_stale = (
+                registry.known and registry.restart_eligible
+                and not registry.ready and not observation.running
+                and observation.identity_verified
+            )
+            if not registry.known:
+                raise PolicyError("registry_readiness_unknown")
+            if not registry.ready and not restarting_stale:
+                raise PolicyError(registry.reason_code or "registry_readiness_failed")
+            reactivating = restarting_stale or bool(seat and seat["reactivation_attempts"])
+            if reactivating:
+                for selected_board in registry.selected_active_boards:
+                    lease = self.leases.observe(selected_board, seat_id)
+                    if not lease.known:
+                        raise PolicyError("lease_state_unknown")
+                    if lease.live:
+                        raise PolicyError("live_lease")
             if observation.running:
                 if not observation.identity_verified:
                     raise PolicyError("process_identity_unknown")
@@ -1699,6 +1770,8 @@ class FleetExecutor:
                     request, digest, "succeeded", committed=False,
                     process_ref=observation.process_ref,
                 )
+            if reactivating and seat and seat["reactivation_exhausted"]:
+                raise PolicyError("registry_reactivation_exhausted")
             host_count, board_count = self.store.active_counts(board_id)
             if host_count >= self.policy.host_cap:
                 raise PolicyError("host_concurrency_cap")
@@ -1716,19 +1789,26 @@ class FleetExecutor:
                 generation=generation, lifecycle="starting", process_ref=None, now=now,
             )
             try:
+                if reactivating:
+                    self.store.reserve_reactivation(seat_id, generation)
                 self.adapter.instantiate(seat_id, template)
                 self.adapter.start(seat_id, template)
                 observation = self.adapter.inspect(seat_id, template)
                 if not observation.ready or not observation.identity_verified:
                     raise RuntimeError("seat_readiness_failed")
-                registry = self.readiness.observe(board_id, seat_id, template)
-                if not registry.known or not registry.ready:
+                post_start = self.readiness.observe(board_id, seat_id, template)
+                pending_join = (
+                    restarting_stale and post_start.known and post_start.restart_eligible
+                    and post_start.selected_active_boards == registry.selected_active_boards
+                )
+                if not post_start.known or not (post_start.ready or pending_join):
                     raise RuntimeError("registry_readiness_failed")
             except Exception:
                 rollback_ok = False
                 try:
                     self.adapter.stop(seat_id, template)
-                    rollback_ok = not self.adapter.inspect(seat_id, template).running
+                    stopped = self.adapter.inspect(seat_id, template)
+                    rollback_ok = not stopped.running and stopped.identity_verified
                 except Exception:
                     rollback_ok = False
                 self.store.save_seat(
@@ -1742,7 +1822,7 @@ class FleetExecutor:
             self.store.save_seat(
                 seat_id=seat_id, board_id=board_id, template=template,
                 identity_id=identity_id, state_id=state_id, state_dir_id=state_dir_id,
-                generation=generation, lifecycle="ready",
+                generation=generation, lifecycle="ready" if post_start.ready else "starting",
                 process_ref=observation.process_ref, now=self.clock(),
             )
             return self._result(

@@ -142,13 +142,22 @@ def test_delivery_policy_activation_is_deterministic_bounded_and_explicit():
         parse_delivery_policy_activation({**record, 'extra': True})
 
 
-def test_batch_policy_requires_a_distinct_customer_pr_target():
+def test_batch_policy_allows_exact_same_base_customer_target_but_not_owned_branch_aliases():
     registry = {'projects': {'api': {
         'integration_ref': 'main',
         'delivery_policy': {'mode': 'batch_pr', 'final_pr_target': 'main'},
     }}}
-    with pytest.raises(ValueError, match='distinct from mapped and integration'):
-        resolve_delivery_policy(registry, 'api')
+    resolved = resolve_delivery_policy(registry, 'api')['policy']
+    assert resolved['mapped_base'] == resolved['final_pr_target'] == 'main'
+    assert resolved['integration_branch'] != 'main'
+
+    for unsafe in ('Pursers-Integration', 'MAIN'):
+        invalid = {'projects': {'api': {
+            'integration_ref': 'main',
+            'delivery_policy': {'mode': 'batch_pr', 'final_pr_target': unsafe},
+        }}}
+        with pytest.raises(ValueError):
+            resolve_delivery_policy(invalid, 'api')
 
 
 def test_existing_integration_workflow_projects_as_branch_only_until_migrated():

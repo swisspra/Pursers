@@ -32,6 +32,12 @@ from pursers_client import (  # noqa: E402
     parse_project_registry,
     resolve_registry_target,
 )
+from pursers_client.project_workflow import (  # noqa: E402
+    final_validation_packet,
+    final_validation_ticket_id,
+    parse_project_workflow,
+    policy_digest,
+)
 
 SPEC = importlib.util.spec_from_file_location("seat_new", ROOT / "seat_new.py")
 assert SPEC and SPEC.loader
@@ -858,12 +864,20 @@ def test_routed_verify_uses_and_cleans_reviewer_owned_clone_without_mutation(
     verified_paths: list[Path] = []
     verify_ticket = generated._verify_ticket
 
-    def track_verification(ticket_value, repo, *, run_suites=False, integration_ref="main"):
+    def track_verification(
+        ticket_value, repo, *, run_suites=False, integration_ref="main",
+        project_registry=None, board_id=None,
+    ):
         verified_paths.append(repo)
         assert repo != routed
         assert repo.is_relative_to(seat_root)
         assert integration_ref == registry["projects"]["sample"]["integration_ref"]
-        return verify_ticket(ticket_value, repo, run_suites=run_suites, integration_ref=integration_ref)
+        assert project_registry["projects"]["sample"]["repository_url"] == registry["projects"]["sample"]["repository_url"]
+        assert board_id == "pursers"
+        return verify_ticket(
+            ticket_value, repo, run_suites=run_suites, integration_ref=integration_ref,
+            project_registry=project_registry, board_id=board_id,
+        )
 
     generated._verify_ticket = track_verification
 
@@ -907,7 +921,9 @@ def test_routed_verify_uses_and_cleans_reviewer_owned_clone_without_mutation(
     monkeypatch.setenv("ONBOARD_BOARD_ID", "pursers")
     monkeypatch.setenv("ONBOARD_AGENT_NAME", "reviewer-a")
 
-    asyncio.run(generated._execute(generated._parser().parse_args(["verify", "TK-review"])))
+    asyncio.run(generated._execute(generated._parser().parse_args([
+        "verify", "TK-review", "--board", "pursers"
+    ])))
 
     output = capsys.readouterr().out
     assert f"verified-sha: {sha}" in output
@@ -920,6 +936,217 @@ def test_routed_verify_uses_and_cleans_reviewer_owned_clone_without_mutation(
         name: (routed / name).read_text(encoding="utf-8")
         for name in original_files
     } == original_files
+
+
+def _final_qa_verification_fixture(tmp_path: Path):
+    author, clone, generated, ticket, sha = _review_verification_fixture(tmp_path)
+    target = "https://example.test/acme/sample"
+    policy = parse_project_workflow({
+        "schema_version": 1, "workflow_id": "workflow:sample", "project_id": "sample",
+        "board_id": "pursers", "cohort_id": "cohort:sample", "sealed": True,
+        "nodes": [{"node_id": "foundation", "ticket_id": "TK-foundation", "requires": [],
+                   "acceptance_checks": ["independent review"]}],
+        "final_validation": {"title": "Final QA", "acceptance_checks": ["combined checks"]},
+    }, project_id="sample", board_id="pursers")
+    # The deterministic ID is derived from the policy, not a caller-selected label.
+    ticket_id = final_validation_ticket_id(policy)
+    branch = f"pursers/{ticket_id}"
+    subprocess.run(
+        ["git", "push", "origin", f"{sha}:refs/heads/{branch}"],
+        cwd=author, check=True, capture_output=True,
+    )
+    activation = {"schema_version": 1, "state": "active",
+                  "policy_sha256": policy_digest(policy), "activation_id": "activation:test"}
+    registry = {"schema_version": 1, "projects": {"sample": {
+        "board_id": "pursers", "work_dir": str(clone), "fleet_clone_dir": str(clone),
+        "repository_url": target, "integration_ref": "main", "status": "active",
+        "butler_workflow": policy, "butler_workflow_activation": activation,
+    }}}
+    description, pages = final_validation_packet(policy, {
+        "ticket_id": ticket_id, "combined_revision": sha,
+        "members": {"TK-foundation": "b" * 40},
+        "acceptance_checks": ["combined checks"],
+    }, delivery={"cohort_id": policy["cohort_id"], "combined_revision": sha})
+    qa_ticket = {
+        "ticket_id": ticket_id, "target_url": target,
+        "required_fields": ["branch_and_commit", "test_output"],
+        "description": description,
+        "annotations": [{"kind": "evidence", "text": page} for page in pages],
+        "annotations_omitted_count": 0, "annotation_count": len(pages),
+        "submission_history": [{
+            "files_changed": ["change.txt"],
+            "notes": f"branch_and_commit: {branch} @ {sha}",
+        }],
+    }
+    return author, clone, generated, qa_ticket, registry, sha
+
+
+def test_final_qa_verify_accepts_aliases_through_routed_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    _author, routed, generated, ticket, registry, sha = _final_qa_verification_fixture(tmp_path)
+    alias = "platform/eol-integration"
+    subprocess.run(
+        ["git", "push", "origin", f"{sha}:refs/heads/{alias}"],
+        cwd=_author, check=True, capture_output=True,
+    )
+    registry["projects"]["sample"]["work_dir"] = str(routed)
+    registry["projects"]["sample"]["fleet_clone_dir"] = str(routed)
+    original_state = subprocess.run(
+        ["git", "status", "--porcelain=v1", "-b"], cwd=routed,
+        check=True, capture_output=True, text=True,
+    ).stdout
+    original_refs = subprocess.run(
+        ["git", "show-ref"], cwd=routed, check=True, capture_output=True, text=True
+    ).stdout
+
+    class ReviewClient:
+        identity = SimpleNamespace(agent_id="AI-reviewer")
+
+        def __init__(self, *_arguments, **_keywords) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_arguments) -> None:
+            pass
+
+        async def board_join(self, **_kwargs):
+            return {"ok": True}
+
+        async def board_state_get(self, *, key):
+            assert key == "project_registry"
+            return {"state": {"key": key, "value": json.dumps(registry)}}
+
+        async def ticket_get(self, ticket_id):
+            assert ticket_id == ticket["ticket_id"]
+            return {"ok": True, "ticket": ticket}
+
+    generated._load_client = lambda: (
+        ReviewClient, frozenset(), "project_registry", frozenset({"ticket_submitted"}),
+        lambda _registry, _home: ["pursers"], lambda _value: registry,
+        lambda registry_value: {"sample": registry_value["projects"]["sample"]["work_dir"]},
+        lambda registry_value: {"sample": registry_value["projects"]["sample"]["work_dir"]},
+        lambda _registry, board, _url: {
+            "board_id": board, "project": "sample",
+            "work_dir": registry["projects"]["sample"]["work_dir"],
+            "operator_work_dir": None,
+        }, None,
+    )
+    monkeypatch.setenv("ONBOARD_CENTRAL_URL", "https://central.example/mcp")
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
+    monkeypatch.setenv("ONBOARD_BOARD_ID", "pursers")
+    monkeypatch.setenv("ONBOARD_AGENT_NAME", "reviewer-a")
+
+    asyncio.run(generated._execute(generated._parser().parse_args([
+        "verify", ticket["ticket_id"], "--board", "pursers"
+    ])))
+
+    output = capsys.readouterr().out
+    json_start = output.rfind("\n{\n")
+    assert json_start >= 0
+    result = json.loads(output[json_start + 1:])
+    assert result["verification"]["ok"] is True
+    assert set(result["verification"]["source_aliases"]) == {
+        f"origin/codex/TK-review", f"origin/{alias}"
+    }
+    assert result["verification"]["final_validation"]["combined_revision"] == sha
+    assert "board-verifier-current.py" not in str(result)
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1", "-b"], cwd=routed,
+        check=True, capture_output=True, text=True,
+    ).stdout == original_state
+    assert subprocess.run(
+        ["git", "show-ref"], cwd=routed, check=True, capture_output=True, text=True
+    ).stdout == original_refs
+
+
+def test_final_qa_verify_accepts_only_authenticated_combined_sha_aliases(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    author, clone, generated, ticket, registry, sha = _final_qa_verification_fixture(tmp_path)
+    alias = "platform/eol-integration"
+    subprocess.run(
+        ["git", "push", "origin", f"{sha}:refs/heads/{alias}"],
+        cwd=author, check=True, capture_output=True,
+    )
+
+    result = generated._verify_ticket(
+        ticket, clone, project_registry=registry, board_id="pursers"
+    )
+
+    output = capsys.readouterr().out
+    assert result["final_validation"] == {"project_id": "sample", "combined_revision": sha}
+    assert "origin/platform/eol-integration" in result["source_aliases"]
+    assert "final-qa-source-aliases:" in output
+    assert result["origin_main_contains"] is False
+
+    ordinary = {**ticket, "ticket_id": "TK-ordinary"}
+    ordinary["submission_history"] = [{
+        **ticket["submission_history"][0],
+        "notes": ticket["submission_history"][0]["notes"].replace(ticket["ticket_id"], "ordinary"),
+    }]
+    with pytest.raises(ValueError, match="other remote branches"):
+        generated._verify_ticket(ordinary, clone)
+
+
+@pytest.mark.parametrize("mutation", ["stale-packet", "wrong-board", "wrong-sha", "inactive-workflow"])
+def test_final_qa_alias_exception_rejects_untrusted_identity(
+    tmp_path: Path, mutation: str,
+) -> None:
+    author, clone, generated, ticket, registry, sha = _final_qa_verification_fixture(tmp_path)
+    alias = "platform/eol-integration"
+    subprocess.run(
+        ["git", "push", "origin", f"{sha}:refs/heads/{alias}"],
+        cwd=author, check=True, capture_output=True,
+    )
+
+    board_id = "pursers"
+    if mutation == "stale-packet":
+        ticket["annotations"][0]["text"] += " stale"
+    elif mutation == "wrong-board":
+        board_id = "another-board"
+    elif mutation == "wrong-sha":
+        wrong_sha = subprocess.run(
+            ["git", "rev-parse", f"{sha}^"], cwd=author, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        wrong_branch = f"platform/eol-{ticket['ticket_id']}"
+        subprocess.run(
+            ["git", "push", "origin", f"{wrong_sha}:refs/heads/{wrong_branch}"],
+            cwd=author, check=True, capture_output=True,
+        )
+        ticket["submission_history"][0]["notes"] = (
+            f"branch_and_commit: {wrong_branch} @ {wrong_sha}"
+        )
+    else:
+        registry["projects"]["sample"]["butler_workflow_activation"]["state"] = "inactive"
+
+    with pytest.raises(ValueError):
+        generated._verify_ticket(ticket, clone, project_registry=registry, board_id=board_id)
+
+
+def test_final_qa_verifier_rejects_stale_packet_and_wrong_branch_tip(tmp_path: Path) -> None:
+    author, clone, generated, ticket, registry, sha = _final_qa_verification_fixture(tmp_path)
+    alias = "platform/eol-integration"
+    subprocess.run(
+        ["git", "push", "origin", f"{sha}:refs/heads/{alias}"],
+        cwd=author, check=True, capture_output=True,
+    )
+    forged_registry = json.loads(json.dumps(registry))
+    forged_registry["projects"]["sample"]["butler_workflow_activation"]["policy_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="other remote branches"):
+        generated._verify_ticket(ticket, clone, project_registry=forged_registry, board_id="pursers")
+
+    branch = ticket["submission_history"][0]["notes"].split(": ", 1)[1].split(" @ ", 1)[0]
+    subprocess.run(
+        ["git", "push", f"--force-with-lease=refs/heads/{branch}:{sha}",
+         "origin", f"{sha}^:refs/heads/{branch}"],
+        cwd=author, check=True, capture_output=True,
+    )
+    with pytest.raises(ValueError, match="source branch tip"):
+        generated._verify_ticket(ticket, clone, project_registry=registry, board_id="pursers")
 
 
 @pytest.mark.parametrize(
@@ -3517,6 +3744,16 @@ def test_generated_claim_routes_matching_seat_owned_clone(
     result = json.loads(capsys.readouterr().out)
     assert claims == ["TK-safe"]
     assert result["work_dir"] == str(dest / "alpha")
+    submission = {"notes": "exact evidence", "test_output": "9 passed"}
+    async def get_with_evidence(ticket_id):
+        return {"ok": True, "ticket": {"ticket_id": ticket_id, "target_url": "alpha/task",
+            "latest_submission": submission, "submission_history": [submission]}}
+    monkeypatch.setattr(Client, "ticket_get", lambda self, ticket_id: get_with_evidence(ticket_id))
+    asyncio.run(generated._execute(generated._parser().parse_args(["get", "TK-safe"])))
+    compact = json.loads(capsys.readouterr().out)
+    assert compact["ticket"]["latest_submission"] == submission
+    assert "submission_history" not in compact["ticket"]
+    assert compact["work_dir"] == result["work_dir"]
 
 
 @pytest.mark.parametrize(

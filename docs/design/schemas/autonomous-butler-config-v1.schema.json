@@ -45,9 +45,9 @@
       "required": ["period", "max_tokens", "max_cost_microunits", "max_external_calls"],
       "properties": {
         "period": {"enum": ["hour", "day", "month"]},
-        "max_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000},
-        "max_cost_microunits": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
-        "max_external_calls": {"type": "integer", "minimum": 0, "maximum": 1000000}
+        "max_tokens": {"type": ["integer", "null"], "minimum": 0, "maximum": 1000000000, "description": "Null means no periodic token cap; zero is zero allowance."},
+        "max_cost_microunits": {"type": ["integer", "null"], "minimum": 0, "maximum": 1000000000000, "description": "Null means no periodic cost cap; zero is zero allowance."},
+        "max_external_calls": {"type": ["integer", "null"], "minimum": 0, "maximum": 1000000, "description": "Null means no periodic external-call cap; zero is zero allowance."}
       }
     },
     "hostRuntime": {

@@ -19,7 +19,7 @@ ROLE_HELP: dict[str, dict[str, Any]] = {
         "purpose": "Claim offered work, keep its lease, validate it, and submit evidence.",
         "prerequisites": ["An active worker identity with can_work=true", "An explicit work offer"],
         "next_actions": [
-            "Read the offered ticket",
+            "Read the offered ticket; use view=full for exact detail and ticket_history_list for older evidence",
             "Claim that exact ticket",
             "Renew its lease while working",
         ],
@@ -32,7 +32,7 @@ ROLE_HELP: dict[str, dict[str, Any]] = {
             "An explicit review offer",
         ],
         "next_actions": [
-            "Read the submitted ticket",
+            "Read the submitted ticket; page retained evidence with ticket_history_list when needed",
             "Claim that exact review",
             "Verify the declared commit independently",
         ],
@@ -51,6 +51,7 @@ ROLE_HELP: dict[str, dict[str, Any]] = {
         ],
         "boundaries": [
             "Do not treat a bounded list as the whole board",
+            "Follow next_cursor unchanged with the same filters and view when every matching ticket is needed",
             "Do not bypass independent review",
         ],
     },

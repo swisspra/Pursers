@@ -318,17 +318,18 @@ class ReviewLeaseTests(unittest.IsolatedAsyncioTestCase):
                 "lease_renew", agent_name="reviewer-a", ticket_id=ticket_id
             )
             listed = await self.call(
-                "ticket_list", agent_name="reviewer-a", status="submitted"
+                "ticket_list", agent_name="reviewer-a", status="submitted", view="work"
             )
             unclaimed = await self.call(
                 "ticket_list",
                 agent_name="reviewer-a",
                 status="submitted",
                 review_unclaimed_only=True,
+                view="work",
             )
             self.principal = self.reviewer_b
             listed_by_other = await self.call(
-                "ticket_list", agent_name="reviewer-b", status="submitted"
+                "ticket_list", agent_name="reviewer-b", status="submitted", view="work"
             )
         self.assertEqual(renewed.structured_content["lease_kind"], "review")
         self.assertGreater(

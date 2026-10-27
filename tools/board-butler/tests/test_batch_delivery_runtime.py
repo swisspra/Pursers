@@ -358,9 +358,109 @@ def test_customer_pr_body_reports_blockers_and_baseline_without_sonar_claim(tmp_
     work.update(blockers='waiting on customer window', baseline_failures='one known flaky check')
     run(rt.collect(policy(), work, release=cohort('TK-one')))
     body = next(call[3] for call in adapter.calls if call[0] == 'create_pr')
-    assert 'Blockers: waiting on customer window' in body
-    assert 'Baseline failures: one known flaky check' in body
-    assert 'does not claim Sonar issues are resolved' in body
+    assert 'waiting on customer window' not in body
+    assert 'one known flaky check' not in body
+    assert 'pending; this summary is not a security approval' in body
+    assert 'Customer merge is manual' in body
+    assert 'Full tests, blockers, baseline findings, report fields, and approval evidence remain' in body
+    batch = next(iter(rt.ledger.document['batches'].values()))
+    assert batch['members']['TK-one']['blockers'] == 'waiting on customer window'
+    assert batch['members']['TK-one']['baseline_failures'] == 'one known flaky check'
+
+
+def test_customer_pr_body_uses_complete_manifest_and_utf16_budget(tmp_path):
+    lots = {f'ticket-{i}-😀': {"ticket_id": f'ticket-{i}-😀', "source_sha": A}
+            for i in range(800)}
+    batch = {'batch_key': 'a' * 64, 'snapshot_sha': 'b' * 40,
+             'snapshot_strategy': 'frozen', 'members': lots,
+             'workflow_delivery': {'board_id': 'pursers', 'project_name': 'Sonar-Ado',
+                                   'cohort_id': 'cohort-1',
+                                   'final_validation_ticket_id': 'TK-wf-123',
+                                   'workflow_policy_sha256': 'c' * 64,
+                                   'final_validation_policy_sha256': 'd' * 64}}
+    rt, _ = runtime(tmp_path)
+    body = rt._pr_body(batch)
+    assert len(body.encode('utf-16-le')) // 2 <= 3700
+    assert 'Full QA ticket/report reference: TK-wf-123' in body
+    assert 'workflow-delivery:' + 'c' * 64 in body
+    assert 'final-report-policy:' + 'd' * 64 in body
+    assert 'complete canonical manifest' in body
+    assert 'QA/security acceptance: pending' in body
+    assert 'Pursers-Batch-Correlation: ' + 'a' * 64 in body
+
+    draft_body = rt._pr_body(batch, draft_report={'quality_status': 'held'})
+    assert len(draft_body.encode('utf-16-le')) // 2 <= 3700
+    assert 'Full QA ticket/report reference: TK-wf-123' in draft_body
+    assert 'workflow-delivery:' + 'c' * 64 in draft_body
+    assert 'final-report-policy:' + 'd' * 64 in draft_body
+    assert 'report-held-draft' in draft_body
+
+
+def test_long_member_evidence_is_retained_and_rolling_update_body_stays_bounded(tmp_path):
+    rt, adapter = runtime(tmp_path)
+    first = member()
+    first.update(summary='summary-' + '😀' * 10_000, tests='full-test-report-' + 'T' * 20_000,
+                 blockers='blocker-' + 'B' * 12_000, baseline_failures='baseline-' + 'F' * 12_000)
+    rolling = policy(snapshot_strategy='rolling')
+    opened = run(rt.collect(rolling, first, release=cohort('TK-one')))
+    batch = rt.ledger.document['batches'][opened['batch_key']]
+    saved = batch['members']['TK-one']
+    assert saved['summary'] == first['summary'] and saved['tests'] == first['tests']
+    assert saved['blockers'] == first['blockers'] and saved['baseline_failures'] == first['baseline_failures']
+    body = next(call[3] for call in adapter.calls if call[0] == 'create_pr')
+    assert len(body.encode('utf-16-le')) // 2 <= 3700
+    second = run(rt.collect(rolling, member('TK-two', C),
+                            release=cohort('TK-one', 'TK-two', cohort_id='ready-2')))
+    assert second['state'] == 'in_delivery'
+    update = next(call for call in adapter.calls if call[0] == 'update_pr')
+    assert len(update[3].encode('utf-16-le')) // 2 <= 3700
+    update_reservation = next(row for row in batch['reservations'].values()
+                              if row['kind'] == 'update_customer_pr')
+    assert update_reservation['payload']['body_sha256']
+
+
+def test_nine_large_evidence_members_render_a_small_complete_manifest(tmp_path):
+    rt, _ = runtime(tmp_path)
+    members = {f'TK-{i:02d}': {'ticket_id': f'TK-{i:02d}', 'source_sha': f'{i + 1:040x}',
+                               'summary': 'S' * 10_000, 'tests': 'T' * 10_000,
+                               'blockers': 'B' * 10_000, 'baseline_failures': 'F' * 10_000}
+               for i in range(9)}
+    batch = {'batch_key': 'a' * 64, 'snapshot_sha': 'b' * 40,
+             'snapshot_strategy': 'frozen', 'members': members}
+    body = rt._pr_body(batch)
+    assert len(body.encode('utf-16-le')) // 2 <= 3700
+    for ticket in members:
+        assert ticket in body
+    assert 'Member manifest SHA-256: ' in body
+
+
+def test_pr_body_preflight_failure_happens_before_mutating_snapshot_or_reservation(tmp_path):
+    rt, adapter = runtime(tmp_path)
+    result = run(rt.collect(policy(), member(), release=cohort('TK-one')))
+    batch = rt.ledger.document['batches'][result['batch_key']]
+    batch['workflow_delivery'] = {'final_validation_ticket_id': 'x' * 8000,
+                                  'workflow_policy_sha256': 'c' * 64,
+                                  'final_validation_policy_sha256': 'd' * 64}
+    before = list(batch['reservations'])
+    rt.ledger.save()
+    batch['state'] = 'collecting'
+    batch['members']['TK-one']['status'] = 'integrated'
+    batch['snapshot_sha'] = None
+    adapter.refs.pop(batch['snapshot_branch'], None)
+    adapter.calls.clear()
+    opened = run(rt.release(policy(), result['batch_key'], request=cohort('TK-one')))
+    assert opened['reason'] == 'customer_pr_body_preflight_failed'
+    assert list(batch['reservations']) == before
+    assert sum(call[0] in {'ensure_branch', 'create_pr'} for call in adapter.calls) == 0
+
+
+def test_pr_body_utf16_budget_rejects_unpaired_surrogates(tmp_path):
+    rt, _ = runtime(tmp_path)
+    batch = {'batch_key': 'a' * 64, 'snapshot_sha': 'b' * 40,
+             'snapshot_strategy': 'frozen',
+             'members': {'bad': {'ticket_id': '\ud800', 'source_sha': A}}}
+    with pytest.raises(ValueError, match='invalid Unicode'):
+        rt._pr_body(batch)
 
 
 def test_customer_squash_completion_is_reconciled_without_downstream_pr(tmp_path):
@@ -486,6 +586,14 @@ def test_verified_git_adapter_drives_branch_only_without_pr_calls(tmp_path):
     assert result['state'] == 'in_delivery'
     snapshot = next(iter(rt.ledger.document['batches'].values()))['snapshot_branch']
     assert run(adapter.read_ref(str(origin), snapshot)) is not None
+
+
+def test_batch_pr_allows_exact_same_base_target_and_rejects_ambiguous_aliases():
+    accepted = m.parse_batch_policy(policy(base_branch='main', target_branch='main'))
+    assert accepted['base_branch'] == accepted['target_branch'] == 'main'
+    for target in ('MAIN', 'pursers/integration'):
+        with pytest.raises(ValueError):
+            m.parse_batch_policy(policy(base_branch='main', target_branch=target))
 
 
 @pytest.mark.parametrize('bad', [

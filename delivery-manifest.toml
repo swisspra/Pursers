@@ -885,3 +885,12 @@ state = "delivered"
 channel = "documented source command"
 evidence = ["docs/managed-intake.md"]
 evidence_contains = ["tools/ado-connector/git_credential.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/seat-kit/refresh_generated_verifier.py"
+kind = "operator-tool"
+source = "tools/seat-kit/refresh_generated_verifier.py"
+state = "delivered"
+channel = "documented Goose seat maintenance command"
+evidence = ["tools/seat-kit/README.md", "tools/seat-kit/tests/test_refresh_generated_verifier.py"]
+evidence_contains = ["refresh_generated_verifier.py", "--apply --idle-confirmed"]

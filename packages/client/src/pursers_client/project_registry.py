@@ -20,6 +20,7 @@ from .delivery_workflow import (
     parse_delivery_workflow,
     resolve_delivery_policy,
 )
+from .project_workflow import parse_project_workflow, parse_workflow_activation
 
 from .client import (
     GENERATION_META_KEY,
@@ -205,6 +206,14 @@ def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
             normalized[name]["fleet"] = project["fleet"]
         if repository_url is not None:
             normalized[name]["repository_url"] = repository_url
+        delivery_mode = project.get("final_validation_delivery", "require_pass")
+        if type(delivery_mode) is not str or delivery_mode not in {"require_pass", "draft_with_report"}:
+            raise ValueError(
+                f"project_registry project {name!r} final_validation_delivery "
+                "must be require_pass or draft_with_report"
+            )
+        if delivery_mode != "require_pass":
+            normalized[name]["final_validation_delivery"] = delivery_mode
         if "delivery_workflow" in project:
             normalized[name]["delivery_workflow"] = parse_delivery_workflow(project["delivery_workflow"])
         if "delivery_policy" in project:
@@ -215,6 +224,21 @@ def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
             normalized[name]["delivery_policy_activation"] = parse_delivery_policy_activation(
                 project["delivery_policy_activation"]
             )
+        if "butler_workflow" in project:
+            try:
+                normalized[name]["butler_workflow"] = parse_project_workflow(
+                    project["butler_workflow"], project_id=name, board_id=board_id
+                )
+                if "butler_workflow_activation" in project:
+                    normalized[name]["butler_workflow_activation"] = parse_workflow_activation(
+                        project["butler_workflow_activation"], normalized[name]["butler_workflow"]
+                    )
+            except ValueError as exc:
+                # Workflow policy is isolated to this project. Bad workflow
+                # metadata must not hide otherwise valid registry routes.
+                normalized[name]["butler_workflow_error"] = str(exc)[:240]
+        elif "butler_workflow_activation" in project:
+            normalized[name]["butler_workflow_error"] = "activation without workflow policy"
         if "integration_ref" in project:
             ref = project["integration_ref"]
             if (
@@ -785,6 +809,7 @@ async def wait_for_boards(
             "status": "submitted" if submitted else "open",
             "include_closed": False,
             "limit": WAIT_RECONCILE_LIMIT,
+            "view": "work",
         }
         if submitted:
             arguments["review_unclaimed_only"] = True

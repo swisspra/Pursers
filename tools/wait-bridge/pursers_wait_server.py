@@ -4983,6 +4983,7 @@ async def _ticket_projection(
     arguments: dict[str, Any] = {
         "include_closed": False,
         "limit": CATCHUP_PAGE_LIMIT,
+        "view": "work",
     }
     if ticket_ids:
         arguments["ticket_ids"] = sorted(ticket_ids)
@@ -5678,6 +5679,7 @@ async def _scan_open_backlog(
             arguments: dict[str, Any] = {
                 "include_closed": False,
                 "limit": BACKLOG_SCAN_LIMIT,
+                "view": "work",
             }
             if wait_for == WAIT_FOR_SUBMITTED:
                 arguments["status"] = "submitted"
@@ -5818,6 +5820,7 @@ async def _reconcile_offers(
         arguments: dict[str, Any] = {
             "include_closed": False,
             "limit": CATCHUP_PAGE_LIMIT,
+            "view": "work",
         }
         if wait_for == WAIT_FOR_SUBMITTED:
             arguments["status"] = "submitted"

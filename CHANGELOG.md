@@ -1,5 +1,11 @@
 # Changelog
 
+- Seat-kit reviewer verification derives a narrowly scoped final-QA source identity
+  from the active sealed workflow and complete immutable packet. Same-SHA delivery
+  refs are reported as aliases only for the exact combined revision, while the
+  ticket-bound source ref, its remote tip, main-reachability fence, and ordinary
+  source verification remain strict.
+
 All notable changes to Pursers are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
@@ -31,6 +37,133 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Fleet's detail event refresh now explicitly disables catchup activity touches
   and cursor acknowledgements, so an admitted stale dashboard identity can read
   without being reactivated or changing lease/member activity state.
+
+### Fixed — bounded customer PR summaries and restart-safe draft reconciliation
+
+- Render ready, draft, and rolling-update descriptions within 3,700 UTF-16 code units.
+  Full member evidence and QA reports remain untruncated in the private delivery ledger
+  and canonical QA packet; the PR summary uses immutable source-manifest digests and
+  explicit pending-QA/security and manual-merge boundaries. Preflight the exact body
+  before snapshot or PR mutation reservations.
+- Let sealed-workflow preparation reach read-only reconciliation for an existing
+  report-held draft intent without retrying its create. Persist the derived
+  `draft_open` state after confirmed reconciliation so it survives restart.
+
+### Added — opt-in report-held draft delivery
+
+- Preserve strict final-QA delivery as the default while allowing a board-admin
+  controlled per-project `final_validation_delivery: "draft_with_report"` option.
+  A verified completed independent QA review may publish one correlated ADO draft
+  PR with its exact report and explicit pending QA/security status. It never
+  approves QA, clears VA/RA holds, promotes a PR to ready, merges, or deploys.
+  See [project workflow delivery](docs/butler-project-workflows.md).
+
+### Fixed — final-QA workspace branch binding
+
+- Bind activated final-validation workspaces to a deterministic ticket branch at
+  the immutable combined source SHA. Authorized workers may safely attach clean
+  exact-SHA detached legacy worktrees and fast-forward only an unused deterministic
+  branch proven ancestral to that SHA using compare-and-swap. Read-only recovery
+  reports detached state and branch recoverability truthfully; ordinary workers,
+  reviewers, dirty/foreign/ambiguous workspaces, and divergent or elsewhere-attached
+  branches remain fail-closed. See the [project workflow guide](docs/butler-project-workflows.md).
+
+### Fixed — reviewer workspace recovery
+
+- Allow an independently assigned reviewer with the exact live submitted-ticket review lease to ask an idempotent bounded coordinator information question using unchanged read/review scopes. Reject expired, foreign, cross-ticket, and unrelated question attempts.
+- Keep event runners alive and leases recoverable when exact submitted candidate identity is missing or context-question reporting fails: sanitize and durably report the typed blocker, avoid paid model launch, and use canonical human-hold/release APIs. Legacy candidates without branch and full SHA require owner/Butler republishing; reviewers never guess a commit.
+- Add regression coverage for least-privilege question authorization, runner hold/release recovery, and the claim-release client call. See [reviewer event recovery](docs/operations/event-recovery-context.md).
+
+### Added — private Sonar–ADO source fork
+
+- Ground both technical holds and coordinator questions in verified existing
+  ticket-workspace facts and bounded same-workflow source references, including
+  independently accepted closed foundations and test harnesses. Hydrate oversized
+  list references before routing so large tickets remain visible to supervision.
+  The autonomous project-sweep deadline now defaults to 120 seconds when omitted;
+  explicit project overrides and existing storage limits remain unchanged.
+- Add project-bound autonomous technical recovery with explicit operator activation,
+  a resident timer independent of board events, paged backlog supervision, per-project
+  deadlines and fair scheduling. Durable decision reservations, retry backoff and
+  no-progress budgets prevent repeated model calls for unchanged blockers. Business
+  contracts, scope expansion, independent review and final combined QA retain their
+  existing authority boundaries. See [the recovery configuration guide](docs/butler-technical-recovery.md).
+- Supply event runners with verified project, Git repository and preserved ticket
+  workspace context while keeping the process in its own identity directory.
+  Recovery preserves existing work and validates current authorization before
+  provisioning a workspace or starting a paid model turn.
+- Reconcile historical inactive work ownership through Central's canonical lifecycle
+  rules while preserving genuine or ambiguous work and review leases. Clarify worker
+  continuation and reviewer comparison against unchanged baseline findings; scoped
+  acceptance does not waive final application validation.
+- Add explicitly activated project workflows to the resident Butler. Coordinator
+  and managed-source tickets share guarded dependency release, independent
+  member acceptance, combined-source QA and configured batch PR or branch-only
+  delivery. Configuration pins the sealed cohort and effective delivery policy
+  to the registered project, board, repository and protected fleet clone.
+  See the [project workflow guide](docs/butler-project-workflows.md).
+- Add a reviewed-cohort delivery adapter around the existing batch runtime.
+  Prepare the owned combined branch without publication, then require independent
+  QA bound to its exact source, complete membership and policy before release.
+  Retain durable correlation and unknown-outcome reconciliation. Native workflow
+  wiring and explicit project activation are separate prerequisites.
+- Record bounded, redacted event-runner diagnostics in private files and expose
+  typed outcomes. A successful child exit does not establish ticket completion;
+  lease, drain and bounded continuation rules remain in force.
+- Clarify the VM role contract: resident Butler owns both intake routes through
+  dependency progression, scoped review, combined QA and configured integration/
+  PR delivery. Coordinator supplies requirements and genuine domain answers.
+  Record the implementation/activation plan separately from skill installation.
+- Add separate VM coordinator and Butler skills for the human-requirement and
+  resident-automation workflows. Document identity and question ownership,
+  source grouping, effective tier/capacity/delivery policy, progressive reads,
+  installation and rollback. Keep these VM skills separate from the portable
+  bundle and from the resident daemon's paid model prompts.
+
+### Fixed — private Sonar–ADO source fork
+
+- Bind native reconciliation and source-writeback ownership to the registry
+  actually read by the resident. Carry original source issue IDs into QA
+  evidence and persist confirmed delivery receipts in the intake index, with
+  recovery after an index-save failure or restart and protection for unknown
+  remote outcomes.
+- Preserve accepted scoped-validation evidence when a member discloses unrelated
+  baseline failures. Keep combined validation and independent final QA as
+  separate delivery gates; retain the original failure reports.
+- Frame final-QA metadata for the installed MCP SDK and bind approval to the
+  actual immutable Central submission and independent-review records using a
+  digest of the complete prepared delivery identity.
+- Allow a batch PR's exact mapped base and customer target to be the same branch.
+  The owned integration and snapshot refs remain separate; no customer final
+  merge or environment-branch write is authorized by this setting.
+- Default direct Central and IDE bulk reads to summary pages, with opaque
+  continuation cursors and explicit routes to full ticket details and retained
+  history. Preserve summary history counts, internal SDK work views, stored
+  ticket text and the expanded board-state capacity. Expose history paging in
+  worker/reviewer relay profiles and bound both question-provider protocols
+  before paid I/O without escaping Unicode inside the model's prompt text.
+- Recover byte-capped ticket projections through bounded, watermark-checked work
+  pages and same-reader detail hydration. Preserve explicit incomplete fences
+  through fleet inventory and return a blocked result before fleet effects or
+  paid intake decisions; protect exact and unknown `creating_report` holders.
+- Page and hydrate approval audit inputs, resolve each ticket's registered
+  repository and pinned branch revision, and invalidate stale classifications
+  after failed refreshes.
+- Make agent-facing MCP bulk reads progressive by default: ten summary tickets
+  per list page and a ten-item, 16-KiB board snapshot. Explicit view/size requests
+  remain available; internal control-plane reads retain their complete evidence.
+
+- Restore regression tests paired with the VM's installed stale-seat recovery,
+  including bounded retries across executor restarts and cross-board lease
+  protection. Update the observer fixture to name its SQL columns after the
+  reactivation counter was added to the executor schema.
+- Permit macOS ACP runners to traverse intermediate executable symlinks using
+  metadata-only permissions. Virtualenv startup and local Git commits remain
+  inside the sandbox; operator configuration and unrelated sibling files remain
+  unreadable.
+- Rebuild the private component lock from the imported Central and Client
+  sources with the pinned build toolchain. Artifact-drift checks remain enabled;
+  package versions and upstream published artifacts are unchanged.
 
 ## [5.2.1] - 2026-10-05
 

@@ -35,12 +35,13 @@ Before approval:
 1. Resolve origin from the routed project, then fetch and detach the exact submitted 40-hex SHA in a reviewer-owned temporary clone. Never mutate the routed checkout.
 2. Compare the cumulative diff from the merge-base of the registry integration_ref (default main) to the submitted SHA with files_changed and ticket scope. Include all repair commits.
 3. Confirm the SHA is on `origin/<submitted-branch>` and never on `origin/main`.
-4. Re-run every claimed suite and compare the real result tails.
-5. Review the diff against the ticket and its dependencies, including exact field, parameter, and event names.
+4. Re-run every claimed suite and compare the real result tails. Compare failures with the immutable accepted baseline under the same commands and environment; distinguish scoped checks from final combined QA.
+5. Review the diff against the ticket and its dependencies, including exact field, parameter, and event names. Judge the declared target and owned compatibility, not unrelated whole-app cleanup.
 6. Run the credential leak scan and report clean or the bounded match count.
 7. Confirm every required_field is present and truthful.
 8. Put the SHA, re-run tails, leak-scan result, and model in review_notes.
 9. Branch/SHA spacing is not a review criterion. Use structured submission fields and the verifier; never reject solely for spaces around @ when identity verification passes.
+10. A fixed target with passing affected checks, truthful evidence and no introduced regression is eligible for scoped approval despite demonstrated unchanged unrelated baseline failures. Record those failures and owners, without claiming whole-project success. Reject unfixed targets, owned compiler/lint/format defects and introduced regressions with concrete repair instructions. Authorized repairs and ordinary scoped submission need no new human permission. Enforce all configured checks on the separate final combined-QA ticket.
 
 Operator-specific leak regexes come from `~/.pursers/leak-markers.txt`, one per line; `PURSERS_LEAK_MARKERS_FILE` overrides that path. Record an empty marker file as a WARN in review_notes, not a blocker. Never print marker values.
 
@@ -828,9 +829,41 @@ def _suite_argv(
     ]
 
 
+def _final_qa_source_identity(
+    ticket: dict[str, Any], sha: str, branch: str, *,
+    project_registry: dict[str, Any] | None, board_id: str | None,
+) -> dict[str, str] | None:
+    """Bind the alias exception to authenticated registry and packet evidence."""
+    if project_registry is None or not board_id:
+        return None
+    from pursers_client.project_workflow import final_validation_workspace_identity
+
+    identity = final_validation_workspace_identity(project_registry, board_id, ticket)
+    if identity is None:
+        return None
+    ticket_id = ticket.get("ticket_id")
+    legacy_prefix = "platform/"
+    legacy_bound = (
+        isinstance(ticket_id, str)
+        and branch.startswith(legacy_prefix)
+        and branch.endswith(ticket_id)
+        and len(branch) > len(legacy_prefix) + len(ticket_id)
+        and branch[-len(ticket_id) - 1] in "-/"
+    )
+    canonical_bound = isinstance(ticket_id, str) and branch == f"pursers/{ticket_id}"
+    if sha != identity["combined_revision"] or not (canonical_bound or legacy_bound):
+        raise ValueError(
+            "verify failed: final-QA submission must use its exact combined revision "
+            "on a ticket-bound source branch"
+        )
+    return identity
+
+
 def _verify_ticket(
     ticket: dict[str, Any], repo: Path, *, run_suites: bool = False,
     integration_ref: str = "main",
+    project_registry: dict[str, Any] | None = None,
+    board_id: str | None = None,
 ) -> dict[str, Any]:
     if not (repo / ".git").exists():
         raise ValueError(f"verify requires a git seat clone: {repo}")
@@ -860,6 +893,13 @@ def _verify_ticket(
     expected_remote = f"origin/{branch}"
     branch_ok = expected_remote in contains
     main_contains = "origin/main" in contains
+    final_qa_identity = _final_qa_source_identity(
+        ticket, sha, branch, project_registry=project_registry, board_id=board_id
+    )
+    final_qa = final_qa_identity is not None
+    source_tip = _git(repo, "rev-parse", f"refs/remotes/{expected_remote}", check=False)
+    if source_tip.returncode == 0 and source_tip.stdout.strip() != sha:
+        raise ValueError("verify failed: submitted source branch tip must equal submitted SHA")
     other_remotes = sorted(
         remote for remote in contains
         if remote.startswith("origin/") and remote != expected_remote
@@ -876,6 +916,8 @@ def _verify_ticket(
         {"only_actual": only_actual, "only_submitted": only_submitted}, sort_keys=True
     ))
     print("remote-branches-containing-sha: " + json.dumps(contains))
+    if final_qa:
+        print("final-qa-source-aliases: " + json.dumps(other_remotes))
     print(f"operator-markers-loaded: {marker_count}")
     print(leak_line)
     suites: list[dict[str, Any]] = []
@@ -929,10 +971,11 @@ def _verify_ticket(
         failures.append(f"SHA is not on {expected_remote}")
     if main_contains:
         failures.append("SHA is already on origin/main")
-    if integration_ref != "main" and f"origin/{integration_ref}" in contains:
+    if (integration_ref != "main" and f"origin/{integration_ref}" in contains
+            and not final_qa):
         failures.append(f"SHA is already on origin/{integration_ref}")
     non_main_others = [remote for remote in other_remotes if remote != "origin/main"]
-    if non_main_others:
+    if non_main_others and not final_qa:
         failures.append("SHA is also on other remote branches: " + ", ".join(non_main_others))
     if leak_rules:
         failures.append("credential leak scan matched: " + ", ".join(leak_rules))
@@ -942,6 +985,8 @@ def _verify_ticket(
         "ok": True, "sha": sha, "branch": branch,
         "integration_ref": integration_ref, "verification_base": base,
         "files_changed_match": True, "origin_main_contains": False,
+        "source_aliases": other_remotes if final_qa else [],
+        "final_validation": final_qa_identity,
         "leak_scan": "clean", "operator_markers_loaded": marker_count,
         "suites": suites,
     }
@@ -1792,7 +1837,8 @@ async def _execute(args: argparse.Namespace) -> None:
                 enriched = {**value, "board_id": target_board, "work_dir": work_dir}
                 if route_error is not None:
                     enriched["routing_error"] = route_error
-                _print(enriched)
+                from pursers_client.model_output import compact_ticket_payload
+                _print(compact_ticket_payload(enriched))
 
             if ROLE == "worker":
                 if args.command == "list":
@@ -2006,6 +2052,7 @@ async def _execute(args: argparse.Namespace) -> None:
                         verification = _verify_ticket(
                             ticket, repo, run_suites=bool(args.run_suites),
                             integration_ref=integration_ref,
+                            project_registry=registry, board_id=target_board,
                         )
                     emit({"ticket": ticket, "verification": verification})
                     return
@@ -2279,6 +2326,10 @@ Wait profile: {profile}
 {loop}
 
 {hard_verify}
+
+## Authorized technical continuation
+
+The current ticket and latest authorized decisions govern its scope. Ordinary required fixes, tests, commits, ticket-branch push and truthful submission need no additional human permission within that scope. Compare the exact accepted baseline and candidate: disclose unchanged unrelated failures, fix owned defects, and keep scoped acceptance separate from final combined QA. Use the configured coordination channel for technical workspace/runtime questions; in an autonomous project the authorized Butler handles them. Recover only the registered protected clone and preserved ticket worktree. Do not guess paths, alter another owner's files or waive tests. Human holds are for genuinely missing domain/authority decisions or exhausted recovery without new progress.
 
 ## Governance
 

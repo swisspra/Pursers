@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pursers VM Coordinator"
+  short_description: "Coordinate requirements on the autonomous VM"
+  default_prompt: "Use $pursers-vm-coordinator to inspect the VM project registry and turn authorized requirements into fleet tickets."

@@ -127,7 +127,25 @@ wait --submitted --since '<cursor-or-json-map>' [--timeout <seconds>] [--boards 
 
 `list` returns only unclaimed submitted tickets and includes `review_state`.
 Use `review-claim` before verification, `renew` every ~5 minutes, and
-`review-release` only when abandoning without a verdict. `approve` and
+`review-release` only when abandoning without a verdict. Final-QA source-alias
+handling is derived only from the authenticated project registry's active sealed
+workflow and the exact paged immutable packet; all non-QA source verification
+remains strict. `refresh_generated_verifier.py` provides a one-seat, dry-run-first
+canonical refresh for existing generated Goose seat wrappers. Run it from
+the source checkout with `python3 tools/seat-kit/refresh_generated_verifier.py
+/path/to/seat` for a dry-run receipt, then add `--apply --idle-confirmed` only
+after independently checking leases and stopping/queueing that seat's child. It
+inventories before/after hashes, snapshots changes, refuses unknown layouts and
+symlinks, and never reads token contents. Where `board.sh` routes `verify` to an
+existing `board-verifier-current.py`, the utility validates and refreshes that
+effective CLI (not the unused `board.py`) while preserving the wrapper routing,
+identity, capabilities, and token-file reference. Otherwise it refreshes
+`board.py`; it does not rewrite launchers or attempt fleet-wide changes.
+For that exact final-QA identity, same-SHA delivery refs are
+reported as aliases, while the ticket-bound submitted branch must still exist at
+the exact submitted SHA and `origin/main` containment remains prohibited. This
+exception does not waive suites, diff/file matching, leak checks, or independent
+review. `approve` and
 `reject` idempotently ensure that this reviewer holds the lease first; a
 `review_already_claimed` conflict means another reviewer won, so return to
 push-wait without polling.
@@ -192,8 +210,8 @@ Before approval:
 1. Fetch and detach the exact submitted 40-hex SHA in the seat clone.
 2. Compare git show --stat and changed paths with files_changed and ticket scope.
 3. Confirm the SHA is on `origin/<submitted-branch>` and never on `origin/main`.
-4. Re-run every claimed suite and compare the real result tails.
-5. Review the diff against the ticket and its dependencies, including exact field, parameter, and event names.
+4. Re-run every claimed suite and compare the real result tails. Compare failures with the immutable accepted baseline under the same commands and environment.
+5. Review the diff against the ticket and its dependencies, including exact field, parameter, and event names. Judge the declared target and owned compatibility separately from final combined QA.
 6. Run the credential leak scan and report clean or the bounded match count.
 7. Confirm every required_field is present and truthful.
 8. Put the SHA, re-run tails, leak-scan result, and model in review_notes.
@@ -203,6 +221,15 @@ Operator-specific leak regexes come from `~/.pursers/leak-markers.txt`, one per 
 Approval notes must contain a full 40-hex SHA, a real `N passed`, `Ran N tests`, or `OK` tail, `leak-scan: clean|N matches`, and `model: NAME`. The emergency flag works only when the operator explicitly sets `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`, and its use is appended to review_notes.
 
 Rejecting is normal and cheap; a wrong approval is expensive.
+
+When a scoped target is fixed, affected checks pass and no regression was
+introduced, demonstrated unchanged unrelated baseline failures are disclosed
+rather than used to reject the ticket. Owned compiler/lint/format defects,
+unfixed targets and introduced regressions still require repair. A separate
+final combined-QA ticket enforces all configured project checks. Workers may
+perform authorized owned repairs and ordinary scoped submission without another
+human permission cycle; technical workspace/runtime questions go to Butler.
+Generated worker and reviewer instructions include this distinction.
 
 ## Wait verb
 
@@ -329,6 +356,8 @@ recovery phase, typed leaf exception classes and the next operator action when t
 bounded window is exhausted. Authentication/authorization failures, mixed exception
 groups, malformed responses and model execution failures remain visible failures
 rather than being blindly retried.
+
+Each model child redirects stdout to discard and drains stderr concurrently into a bounded 64 KiB tail (total file sizes do not accumulate in memory). The runner redacts the configured token, recognized credential-valued environment settings, and common bearer/basic/JWT/header patterns, then atomically retains at most 20 owner-only diagnostic records (20 KiB evidence, 32 KiB file, seven-day retention) under the private state directory. Evidence is correlated by board, ticket, claim reference and attempt/operation ID. Omitted stdout and private prompt are explicitly recorded; diagnostics are local and are not sent to Central notes or public logs. A compact `last_turn` record exposes the typed runtime outcome and evidence reference. A zero child exit is always unverified until the same-principal Central ticket read confirms submitted, closed, human-held, or unfinished with the exact live owned claim. A restarted process reconciles that authoritative state and keeps the existing per-claim recovery limit; repeated identical evidence cannot reset it. Reviewer prompts distinguish scoped ticket acceptance from final whole-project QA: unchanged unrelated baseline findings are reported without calling the project green or waiving its configured final gate; introduced regressions and an unfixed target remain blockers, and missing facts are explicit.
 
 During a managed model turn, the event runner refreshes the same seat presence on
 every active registry board every 120 seconds. These keepalives preserve the

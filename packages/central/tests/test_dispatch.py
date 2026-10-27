@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import math
 import os
 import sqlite3
 import sys
@@ -1504,6 +1505,420 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             claimed.structured_content["ticket"]["claimed_by_agent_id"], worker
         )
+
+    async def test_historical_owner_is_reconciled_once_and_normal_dispatch_recovers(self) -> None:
+        # Exercise the same generic malformed legacy row in two unrelated board,
+        # project, and ticket namespaces. The owner is retained for audit, but an
+        # open ticket with no live/ambiguous lease must not invalidate its offer.
+        scenarios = (
+            ("pursers", "TK-historical-owner-a", "project-alpha/packages/central"),
+            ("sonar-adoption", "TK-historical-owner-b", "project-beta/packages/central"),
+        )
+        for board_id, ticket_id, target in scenarios:
+            with self.subTest(board_id=board_id, ticket_id=ticket_id):
+                async def on_board(name: str, **arguments: object):
+                    return await self.mcp.call_tool(
+                        name, {"board_id": board_id, **arguments}
+                    )
+
+                if board_id != "pursers":
+                    self.principal = self.admin
+                    await on_board("board_join", agent_name="admin-agent")
+                worker_ids: dict[str, str] = {}
+                for principal, name, role, capabilities in (
+                    (self.worker_a, "historical-worker", "member",
+                     {"can_work": True, "can_review": False, "tier_max": 2}),
+                    (self.worker_b, "historical-prior-owner", "member",
+                     {"can_work": True, "can_review": False, "tier_max": 2}),
+                    (self.reviewer_a, "historical-reviewer", "reviewer",
+                     {"can_work": False, "can_review": True, "tier_max": 2}),
+                ):
+                    self.principal = self.admin
+                    await on_board(
+                        "board_member_add", agent_name="admin-agent",
+                        principal_id=principal.principal_id, role=role,
+                    )
+                    self.principal = principal
+                    joined = await on_board(
+                        "board_join", agent_name=name, role=(
+                            "reviewer" if role == "reviewer" else "worker"
+                        ), capabilities=capabilities,
+                    )
+                    worker_ids[name] = joined.structured_content["agent_id"]
+                    self.service.register_listener(board_id, worker_ids[name])
+                    await on_board(
+                        "agent_readiness_set", agent_name=name,
+                        readiness=self.readiness(
+                            f"historical-session-{name}", 1, dispatch_ready=True
+                        ),
+                    )
+
+                self.principal = self.admin
+                await on_board(
+                    "board_dispatch_policy_set", agent_name="admin-agent",
+                    second_opinion=False, fallback_broadcast=False,
+                )
+                created = await on_board(
+                    "ticket_create", ticket_id=ticket_id, agent_name="admin-agent",
+                    title="Historical ownership recovery", description="Generic test row",
+                    target_url=target, scope="interactive-no-send",
+                    required_fields=["test_output"], unassigned=True,
+                )
+                ticket = created.structured_content["ticket"]
+                self.assertEqual(ticket["status"], "open")
+                self.assertIn("work_offer", ticket, ticket)
+                first_offer = ticket["work_offer"]
+                prior_agent = worker_ids["historical-prior-owner"]
+                prior_principal = self.worker_b.principal_id
+
+                def restore_legacy_shape(document: dict[str, Any]) -> None:
+                    row = document["tickets"][ticket_id]
+                    row.update({
+                        "claimed_by_agent_id": prior_agent,
+                        "claimed_by_principal_id": prior_principal,
+                        "claimed_by": "historical-prior-owner",
+                        "claimed_at": central.iso_at(central.time.time() - 3600),
+                        "lease_expires_at_epoch": None,
+                        "lease_expires_at": None,
+                        "parked": False,
+                    })
+                    row.pop("review_lease", None)
+
+                self.service.mutate(board_id, restore_legacy_shape, require_generation=False)
+                before_history = list(
+                    self.service.load(board_id)["tickets"][ticket_id]["dispatch_history"]
+                )
+                self.principal = self.admin
+                first_reap = await on_board("board_reap")
+                repaired = self.service.load(board_id)["tickets"][ticket_id]
+                self.assertEqual(repaired["work_offer"], first_offer)
+                self.assertNotIn("claimed_by_agent_id", repaired)
+                self.assertEqual(repaired["last_claimed_by_agent_id"], prior_agent)
+                self.assertEqual(repaired["last_claimed_by_principal_id"], prior_principal)
+                self.assertEqual(repaired["last_claimed_by"], "historical-prior-owner")
+                self.assertEqual(repaired["last_release_reason"], "inactive ticket lifecycle")
+                reconciliations = [
+                    item for item in repaired["dispatch_history"]
+                    if item.get("state") == "work_ownership_reconciled"
+                ]
+                self.assertEqual(len(reconciliations), 1)
+                self.assertEqual(len(repaired["dispatch_history"]), len(before_history) + 1)
+                self.assertEqual(first_reap.structured_content["release_events"], [])
+
+                for _ in range(2):
+                    again = await on_board("board_reap")
+                    still_stable = self.service.load(board_id)["tickets"][ticket_id]
+                    self.assertEqual(still_stable["work_offer"], first_offer)
+                    self.assertEqual(still_stable["dispatch_history"], repaired["dispatch_history"])
+                    self.assertEqual(again.structured_content["release_events"], [])
+
+                offered_agent = first_offer["agent_id"]
+                if offered_agent == worker_ids["historical-worker"]:
+                    claimant, claimant_name = self.worker_a, "historical-worker"
+                else:
+                    self.assertEqual(offered_agent, prior_agent)
+                    claimant, claimant_name = self.worker_b, "historical-prior-owner"
+                self.principal = claimant
+                claimed = await on_board(
+                    "ticket_claim", agent_name=claimant_name, ticket_id=ticket_id
+                )
+                self.assertEqual(
+                    claimed.structured_content["ticket"]["claimed_by_agent_id"],
+                    offered_agent,
+                )
+                # Even when the former holder is also the newly selected worker,
+                # the former identity cannot act through stale pre-reconciliation
+                # fields; its only rights now come from its actual current lease.
+                if claimant is not self.worker_b:
+                    self.principal = self.worker_b
+                    with self.assertRaisesRegex(ToolError, "lease is not held by this principal"):
+                        await on_board(
+                            "lease_renew", agent_name="historical-prior-owner",
+                            ticket_id=ticket_id,
+                        )
+                    with self.assertRaises(ToolError):
+                        await on_board(
+                            "ticket_cancel", agent_name="historical-prior-owner",
+                            ticket_id=ticket_id,
+                        )
+                    self.principal = claimant
+
+                submitted = await on_board(
+                    "ticket_submit", agent_name=claimant_name, ticket_id=ticket_id,
+                    summary="recovered", test_output="PASS: recovered work claim",
+                )
+                self.assertEqual(submitted.structured_content["ticket"]["status"], "submitted")
+                self.principal = self.reviewer_a
+                review_claim = await on_board(
+                    "ticket_review_claim", agent_name="historical-reviewer",
+                    ticket_id=ticket_id,
+                )
+                self.assertTrue(review_claim.structured_content["ok"])
+                verdict = await on_board(
+                    "ticket_review", agent_name="historical-reviewer",
+                    ticket_id=ticket_id, verdict="approve",
+                    review_notes="Independent disposable regression verification",
+                )
+                self.assertEqual(verdict.structured_content["ticket"]["status"], "closed")
+
+    async def test_historical_owner_recovery_preserves_timezone_naive_work_expiry(self) -> None:
+        worker = await self.add_seat(
+            self.worker_a, "naive-expiry-worker",
+            {"can_work": True, "can_review": False, "tier_max": 2},
+        )
+        self.service.register_listener("pursers", worker)
+        self.principal = self.worker_a
+        await self.call(
+            "agent_readiness_set", agent_name="naive-expiry-worker",
+            readiness=self.readiness("naive-expiry-session", 1, dispatch_ready=True),
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent",
+            second_opinion=False, fallback_broadcast=False,
+        )
+        now = time.time()
+        ticket_id = "TK-historical-owner-naive-work-expiry"
+        created = await self.call(
+            "ticket_create", ticket_id=ticket_id, agent_name="admin-agent",
+            title="Timezone-naive work expiry remains ambiguous",
+            description="Generic inactive owner with naive expiry and expired epoch",
+            target_url="project-alpha/packages/central", scope="interactive-no-send",
+            required_fields=["test_output"], unassigned=True,
+        )
+        initial_offer = created.structured_content["ticket"].get("work_offer")
+        self.assertIsNotNone(initial_offer)
+        prior_agent = "AI-historical-naive-owner"
+        prior_principal = "PR-historical-naive-owner"
+        naive_text = "2001-01-01T00:00:00"
+
+        def restore_legacy_shape(document: dict[str, Any]) -> None:
+            row = document["tickets"][ticket_id]
+            row.update({
+                "claimed_by_agent_id": prior_agent,
+                "claimed_by_principal_id": prior_principal,
+                "claimed_by": "historical-naive-owner",
+                "claimed_at": central.iso_at(now - 3600),
+                "lease_expires_at_epoch": now - 60,
+                "lease_expires_at": naive_text,
+                "parked": False,
+            })
+            row.pop("review_lease", None)
+
+        self.service.mutate("pursers", restore_legacy_shape, require_generation=False)
+        self.principal = self.admin
+        await self.call("board_reap")
+        preserved = self.service.load("pursers")["tickets"][ticket_id]
+        self.assertEqual(preserved.get("claimed_by_agent_id"), prior_agent)
+        self.assertEqual(preserved.get("claimed_by_principal_id"), prior_principal)
+        self.assertEqual(preserved.get("lease_expires_at"), naive_text)
+        self.assertNotIn("last_claimed_by_agent_id", preserved)
+        self.assertNotIn("work_offer", preserved)
+        history_after_first_reap = copy.deepcopy(preserved["dispatch_history"])
+
+        await self.call("board_reap")
+        repeated = self.service.load("pursers")["tickets"][ticket_id]
+        self.assertEqual(repeated["dispatch_history"], history_after_first_reap)
+        self.assertEqual(repeated.get("claimed_by_agent_id"), prior_agent)
+        self.assertEqual(repeated.get("lease_expires_at"), naive_text)
+        self.assertNotIn("work_offer", repeated)
+
+    async def test_historical_owner_recovery_preserves_non_finite_work_expiry(self) -> None:
+        worker = await self.add_seat(
+            self.worker_a, "nonfinite-expiry-worker",
+            {"can_work": True, "can_review": False, "tier_max": 2},
+        )
+        self.service.register_listener("pursers", worker)
+        self.principal = self.worker_a
+        await self.call(
+            "agent_readiness_set", agent_name="nonfinite-expiry-worker",
+            readiness=self.readiness("nonfinite-expiry-session", 1, dispatch_ready=True),
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent",
+            second_opinion=False, fallback_broadcast=False,
+        )
+        now = time.time()
+        non_finite_expiries = (float("nan"), float("inf"), float("-inf"))
+        for index, expiry in enumerate(non_finite_expiries):
+            ticket_id = f"TK-historical-owner-nonfinite-expiry-{index}"
+            created = await self.call(
+                "ticket_create", ticket_id=ticket_id, agent_name="admin-agent",
+                title="Non-finite work expiry remains ambiguous",
+                description="Generic inactive owner with malformed non-finite expiry",
+                target_url="project-alpha/packages/central", scope="interactive-no-send",
+                required_fields=["test_output"], unassigned=True,
+            )
+            initial_offer = created.structured_content["ticket"].get("work_offer")
+            self.assertIsNotNone(initial_offer)
+            prior_agent = f"AI-historical-nonfinite-owner-{index}"
+            prior_principal = f"PR-historical-nonfinite-owner-{index}"
+
+            def restore_legacy_shape(document: dict[str, Any]) -> None:
+                row = document["tickets"][ticket_id]
+                row.update({
+                    "claimed_by_agent_id": prior_agent,
+                    "claimed_by_principal_id": prior_principal,
+                    "claimed_by": "historical-nonfinite-owner",
+                    "claimed_at": central.iso_at(now - 3600),
+                    "lease_expires_at_epoch": expiry,
+                    "lease_expires_at": None,
+                    "parked": False,
+                })
+                row.pop("review_lease", None)
+
+            self.service.mutate("pursers", restore_legacy_shape, require_generation=False)
+            self.principal = self.admin
+            await self.call("board_reap")
+            preserved = self.service.load("pursers")["tickets"][ticket_id]
+            self.assertEqual(preserved.get("claimed_by_agent_id"), prior_agent)
+            self.assertEqual(preserved.get("claimed_by_principal_id"), prior_principal)
+            self.assertEqual(preserved.get("claimed_by"), "historical-nonfinite-owner")
+            preserved_expiry = preserved.get("lease_expires_at_epoch")
+            self.assertIsNotNone(preserved_expiry)
+            if math.isnan(expiry):
+                self.assertTrue(math.isnan(preserved_expiry))
+            else:
+                self.assertEqual(preserved_expiry, expiry)
+            self.assertNotIn("last_claimed_by_agent_id", preserved)
+            self.assertNotIn("work_offer", preserved)
+            history_after_first_reap = copy.deepcopy(preserved["dispatch_history"])
+
+            await self.call("board_reap")
+            repeated = self.service.load("pursers")["tickets"][ticket_id]
+            self.assertEqual(repeated["dispatch_history"], history_after_first_reap)
+            self.assertEqual(repeated.get("claimed_by_agent_id"), prior_agent)
+            self.assertEqual(repeated.get("claimed_by_principal_id"), prior_principal)
+            repeated_expiry = repeated.get("lease_expires_at_epoch")
+            self.assertIsNotNone(repeated_expiry)
+            if math.isnan(expiry):
+                self.assertTrue(math.isnan(repeated_expiry))
+            else:
+                self.assertEqual(repeated_expiry, expiry)
+            self.assertNotIn("work_offer", repeated)
+
+    async def test_historical_owner_recovery_preserves_ambiguous_review_expiry(self) -> None:
+        worker = await self.add_seat(
+            self.worker_a, "review-expiry-worker",
+            {"can_work": True, "can_review": False, "tier_max": 2},
+        )
+        self.service.register_listener("pursers", worker)
+        self.principal = self.worker_a
+        await self.call(
+            "agent_readiness_set", agent_name="review-expiry-worker",
+            readiness=self.readiness("review-expiry-session", 1, dispatch_ready=True),
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent",
+            second_opinion=False, fallback_broadcast=False,
+        )
+        now = time.time()
+        malformed_review_leases = (
+            (
+                "future_text_with_expired_epoch",
+                {"expires_at_epoch": now - 60, "expires_at": central.iso_at(now + 60)},
+            ),
+            (
+                "mismatched_expired_fields",
+                {"expires_at_epoch": now - 60, "expires_at": central.iso_at(now - 120)},
+            ),
+            (
+                "malformed_text_with_expired_epoch",
+                {"expires_at_epoch": now - 60, "expires_at": "not-a-date"},
+            ),
+            (
+                "timezone_invalid_text_with_expired_epoch",
+                {"expires_at_epoch": now - 60, "expires_at": "2030-01-01T00:00:00"},
+            ),
+            ("non_mapping_review_lease", "malformed legacy lease"),
+            ("missing_expiry_review_lease", {"reviewer_agent_id": "historical-reviewer"}),
+        )
+        for suffix, review_lease in malformed_review_leases:
+            ticket_id = f"TK-review-expiry-{suffix}"
+            created = await self.call(
+                "ticket_create", ticket_id=ticket_id,
+                agent_name="admin-agent", title="Ambiguous review lease recovery",
+                description="Generic inactive owner with ambiguous review evidence",
+                target_url="project-alpha/packages/central", scope="interactive-no-send",
+                required_fields=["test_output"], unassigned=True,
+            )
+            initial_offer = created.structured_content["ticket"].get("work_offer")
+            self.assertIsNotNone(initial_offer, suffix)
+            prior_agent = "AI-historical-review-owner"
+            prior_principal = "PR-historical-review-owner"
+
+            def restore_legacy_shape(document: dict[str, Any]) -> None:
+                row = document["tickets"][ticket_id]
+                row.update({
+                    "claimed_by_agent_id": prior_agent,
+                    "claimed_by_principal_id": prior_principal,
+                    "claimed_by": "historical-review-owner",
+                    "claimed_at": central.iso_at(now - 3600),
+                    "lease_expires_at_epoch": None,
+                    "lease_expires_at": None,
+                    "parked": False,
+                    "review_lease": copy.deepcopy(review_lease),
+                })
+
+            self.service.mutate("pursers", restore_legacy_shape, require_generation=False)
+            self.principal = self.admin
+            await self.call("board_reap")
+            preserved = self.service.load("pursers")["tickets"][ticket_id]
+            self.assertEqual(preserved.get("claimed_by_agent_id"), prior_agent, suffix)
+            self.assertEqual(preserved.get("claimed_by_principal_id"), prior_principal, suffix)
+            self.assertEqual(preserved.get("claimed_by"), "historical-review-owner", suffix)
+            self.assertEqual(preserved.get("review_lease"), review_lease, suffix)
+            self.assertNotIn("last_claimed_by_agent_id", preserved, suffix)
+            # The stale offer is revoked, but ambiguous lease evidence prevents
+            # reconciliation and dispatch from creating a replacement offer.
+            self.assertNotIn("work_offer", preserved, suffix)
+            history_after_first_reap = copy.deepcopy(preserved["dispatch_history"])
+            await self.call("board_reap")
+            repeated = self.service.load("pursers")["tickets"][ticket_id]
+            self.assertEqual(repeated["dispatch_history"], history_after_first_reap, suffix)
+            self.assertEqual(repeated.get("claimed_by_agent_id"), prior_agent, suffix)
+            self.assertEqual(repeated.get("review_lease"), review_lease, suffix)
+            self.assertNotIn("work_offer", repeated, suffix)
+
+        ticket_id = "TK-review-expiry-valid"
+        created = await self.call(
+            "ticket_create", ticket_id=ticket_id, agent_name="admin-agent",
+            title="Expired review lease permits recovery",
+            description="Valid expired review lease remains recoverable",
+            target_url="project-alpha/packages/central", scope="interactive-no-send",
+            required_fields=["test_output"], unassigned=True,
+        )
+        self.assertIsNotNone(created.structured_content["ticket"].get("work_offer"))
+        expired_review_lease = {
+            "reviewer_agent_id": "AI-historical-reviewer",
+            "reviewer_principal_id": "PR-historical-reviewer",
+            "expires_at_epoch": now - 60,
+            "expires_at": central.iso_at(now - 60),
+        }
+
+        def restore_valid_expired_shape(document: dict[str, Any]) -> None:
+            row = document["tickets"][ticket_id]
+            row.update({
+                "claimed_by_agent_id": "AI-historical-review-owner",
+                "claimed_by_principal_id": "PR-historical-review-owner",
+                "claimed_by": "historical-review-owner",
+                "claimed_at": central.iso_at(now - 3600),
+                "lease_expires_at_epoch": None,
+                "lease_expires_at": None,
+                "parked": False,
+                "review_lease": expired_review_lease,
+            })
+
+        self.service.mutate("pursers", restore_valid_expired_shape, require_generation=False)
+        self.principal = self.admin
+        await self.call("board_reap")
+        recovered = self.service.load("pursers")["tickets"][ticket_id]
+        self.assertNotIn("claimed_by_agent_id", recovered)
+        self.assertNotIn("review_lease", recovered)
+        self.assertEqual(recovered["last_claimed_by_agent_id"], "AI-historical-review-owner")
+        self.assertIsNotNone(recovered.get("work_offer"))
 
     async def test_repeated_unoffered_claim_does_not_create_its_own_offer(self) -> None:
         offered = await self.add_seat(

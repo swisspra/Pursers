@@ -31,6 +31,7 @@ from .client import (
     SUBMIT_BRANCH_LABEL_RE,
     signed_remote_submission,
 )
+from .model_output import compact_ticket_payload
 from .discovery import (
     DISCOVERY_SCHEMA,
     DISCOVERY_VERSION,
@@ -70,6 +71,7 @@ DEFAULT_TOOLS = frozenset(
         "ticket_annotate",
         "ticket_create",
         "ticket_get",
+        "ticket_history_list",
         "ticket_human_resolve",
         "ticket_list",
         "ticket_question_answer",
@@ -85,6 +87,7 @@ WORKER_TOOLS = frozenset(
         "ticket_annotate",
         "ticket_claim",
         "ticket_get",
+        "ticket_history_list",
         "ticket_progress_update",
         "ticket_question_ask",
         "ticket_request_human",
@@ -99,6 +102,7 @@ REVIEWER_TOOLS = frozenset(
         "lease_renew",
         "ticket_annotate",
         "ticket_get",
+        "ticket_history_list",
         "ticket_question_ask",
         "ticket_request_human",
         "ticket_review",
@@ -113,12 +117,20 @@ TOOL_PROFILES: dict[str, frozenset[str] | None] = {
     "all": None,
 }
 ROLE_TOOL_PROFILES = frozenset({"worker", "reviewer"})
+MODEL_READ_DEFAULTS = {
+    "ticket_list": {"view": "summary", "limit": 10, "max_bytes": 32_768},
+    "board_snapshot": {"limit": 10, "max_bytes": 16_384},
+    "ticket_history_list": {"limit": 10},
+}
 WAIT_TOOL_NAMES = frozenset(
     {"a2a_wait", "ticket_question_wait", "butler_command_wait"}
 )
 VERIFIED_SUBMIT_TOOL = "ticket_submit"
 MAX_WAIT_SECONDS = 50
 PROMPT_BEHAVIOR_INSTRUCTIONS = (
+    "Read summaries first. Follow next_cursor unchanged with the same filters and view "
+    "only when the task needs more matching tickets. Open one ticket with view=full "
+    "and page retained evidence with ticket_history_list; summaries are not evidence. "
     "Pursers prompt behavior: board summaries stay on the selected board, report "
     "board-wide counts, clearly label the attention rows as a subset of no more than "
     "10 active tickets, and lead each row with its ID and specific reason. Ticket "
@@ -559,10 +571,19 @@ class CentralRelay:
         for tool in tools:
             schema = tool.input_schema
             properties = schema.get("properties", {})
-            if "agent_name" not in properties:
-                exposed_tools.append(tool)
-                continue
             exposed = tool.model_copy(deep=True)
+            for key, value in MODEL_READ_DEFAULTS.get(tool.name, {}).items():
+                if key in properties:
+                    exposed.input_schema["properties"][key]["default"] = value
+            if tool.name == "ticket_list" and "view" in properties:
+                exposed.description = (
+                    f"{exposed.description or ''} Defaults to a small summary page. "
+                    "Follow next_cursor for more; read one ticket with ticket_get "
+                    "when its work or full evidence is needed."
+                )
+            if "agent_name" not in properties:
+                exposed_tools.append(exposed)
+                continue
             required = exposed.input_schema.get("required")
             if tool.name == VERIFIED_SUBMIT_TOOL:
                 submit_properties = exposed.input_schema.setdefault("properties", {})
@@ -581,10 +602,35 @@ class CentralRelay:
                     ]
                     required = exposed.input_schema["required"]
                 exposed.description = (
-                    f"{exposed.description} For code submissions, the relay verifies "
+                    f"{exposed.description} For code submissions, supply repository as "
+                    "the absolute clone-owning repository path. The relay verifies "
                     "the exact origin branch tip and signs the proof without exposing "
                     "the bearer credential."
                 )
+            if self.tools_mode in ROLE_TOOL_PROFILES and "model_usage" in properties:
+                exposed.input_schema["properties"]["model_usage"] = {
+                    "anyOf": [
+                        {"type": "null"},
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["schema_version", "turns", "reported_turns"],
+                            "properties": {
+                                "schema_version": {"type": "integer", "const": 1},
+                                "turns": {"type": "integer", "minimum": 0, "maximum": 1_000_000},
+                                "reported_turns": {"type": "integer", "minimum": 0, "maximum": 1_000_000},
+                                "input_tokens": {"type": ["integer", "null"], "minimum": 0, "maximum": 1_000_000_000_000},
+                                "output_tokens": {"type": ["integer", "null"], "minimum": 0, "maximum": 1_000_000_000_000},
+                            },
+                        },
+                    ],
+                    "description": (
+                        "Optional observed usage only; omit or use null if unavailable. "
+                        "Never invent counters or supply role, host, provider, model or identity. "
+                        "reported_turns must not exceed turns. Both token totals must be integers "
+                        "exactly when reported_turns equals turns; otherwise keep totals unknown."
+                    ),
+                }
             if self._resolved_agent_name is not None:
                 self._local_identity_tools.add(tool.name)
                 exposed.input_schema["properties"].pop("agent_name")
@@ -1015,17 +1061,50 @@ class CentralRelay:
         payload["tools_list_changed"] = True
         return self._json_result(payload)
 
+    def _model_result(
+        self, name: str, arguments: dict[str, Any], result: types.CallToolResult
+    ) -> types.CallToolResult:
+        if self.tools_mode not in ROLE_TOOL_PROFILES or result.is_error:
+            return result
+        payload = result.structured_content
+        if not isinstance(payload, dict) or payload.get("ok") is False or "error" in payload:
+            return result
+        # Reformat only an exact JSON mirror, never unique text or non-text data.
+        mirrors = []
+        for index, block in enumerate(result.content):
+            if isinstance(block, types.TextContent):
+                try:
+                    if json.loads(block.text) == payload:
+                        mirrors.append(index)
+                except (ValueError, TypeError):
+                    pass
+        if not mirrors:
+            return result
+        compact = payload
+        if name == "ticket_get" and arguments.get("view", "work") == "work":
+            compact = compact_ticket_payload(payload)
+        content = list(result.content)
+        for index in mirrors:
+            text = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+            content[index] = content[index].model_copy(update={"text": text})
+        return result.model_copy(update={"content": content, "structured_content": compact})
+
     def _arguments_for(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         tool = self._known_tools.get(name)
         schema = getattr(tool, "input_schema", None) if tool is not None else None
         if not isinstance(schema, dict):
             schema = getattr(tool, "inputSchema", None) if tool is not None else None
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        for key, value in MODEL_READ_DEFAULTS.get(name, {}).items():
+            if key in properties and key not in arguments:
+                arguments = {key: value, **arguments}
         if "board_id" in properties and "board_id" not in arguments:
             arguments = {"board_id": self.board, **arguments}
         if name in self._local_identity_tools and "agent_name" not in arguments:
             assert self._resolved_agent_name is not None
             arguments = {"agent_name": self._resolved_agent_name, **arguments}
+        if name == "ticket_get" and self.tools_mode in ROLE_TOOL_PROFILES:
+            arguments = {"view": "work", **arguments}
         if name in WAIT_TOOL_NAMES:
             for key in ("timeout_s", "wait_seconds", "timeout"):
                 if key not in properties:
@@ -1131,15 +1210,17 @@ class CentralRelay:
                 )
                 if code_submission:
                     repository = self._submission_repository(repository_value)
-                    return await self._call_verified_submit(payload, repository, notes)
+                    result = await self._call_verified_submit(payload, repository, notes)
+                    return self._model_result(name, payload, result)
                 if repository_value is not None:
                     raise RelayFailure(
                         "repository is accepted only when notes contains exactly one "
                         "branch_and_commit line"
                     )
-            return await self._retrying(
+            result = await self._retrying(
                 lambda client: client.call_tool(name, payload)
             )
+            return self._model_result(name, payload, result)
         except Exception as exc:
             failure = self._safe_failure(exc)
             self._report(failure)

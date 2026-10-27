@@ -69,6 +69,9 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
         self.other = central.Principal(
             "PR-other", "other", frozenset({"board:read", "board:write"})
         )
+        self.reviewer = central.Principal(
+            "PR-reviewer", "reviewer", frozenset({"board:read", "board:review"})
+        )
         self.principal = self.admin
         self.original_current_principal = central.current_principal
         self.original_current_host_binding = central.current_host_binding
@@ -81,14 +84,19 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
         await self.call("board_join", agent_name="admin-agent")
         self.agent_ids: dict[str, str] = {}
         for principal in (
-            self.coordinator, self.coordinator_two, self.worker, self.other
+            self.coordinator, self.coordinator_two, self.worker, self.other,
+            self.reviewer,
         ):
+            membership_role = "reviewer" if principal is self.reviewer else "member"
             await self.call(
                 "board_member_add", agent_name="admin-agent",
-                principal_id=principal.principal_id, role="member",
+                principal_id=principal.principal_id, role=membership_role,
             )
             self.principal = principal
-            joined = await self.call("board_join", agent_name=principal.canonical)
+            joined = await self.call(
+                "board_join", agent_name=principal.canonical,
+                **({"role": "reviewer"} if principal is self.reviewer else {}),
+            )
             self.agent_ids[principal.canonical] = (
                 joined.structured_content["agent_id"]
             )
@@ -300,29 +308,180 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
 
         def grant_review_lease(document: dict[str, object]) -> dict[str, object]:
             ticket = document["tickets"]["TK-comm"]
+            ticket["status"] = "submitted"
             ticket["review_lease"] = {
-                "reviewer_agent_id": self.agent_ids["other"],
-                "reviewer_agent_name": "other",
-                "reviewer_principal_id": self.other.principal_id,
+                "reviewer_agent_id": self.agent_ids["reviewer"],
+                "reviewer_agent_name": "reviewer",
+                "reviewer_principal_id": self.reviewer.principal_id,
+                "expires_at_epoch": 4_000_000_000,
             }
             return {}
 
         self.service.mutate("pursers", grant_review_lease)
-        self.principal = self.other
+        self.principal = self.admin
+        await self.call(
+            "board_scrub_profile_set", agent_name="admin-agent",
+            scrub_profile="internal",
+        )
+        self.principal = self.reviewer
+        self.assertEqual(
+            self.reviewer.scopes, frozenset({"board:read", "board:review"})
+        )
         result = (
             await self.call(
-                "ticket_question_ask", ticket_id="TK-comm", agent_name="other",
+                "ticket_question_ask", ticket_id="TK-comm", agent_name="reviewer",
                 message="Is the ACL matrix in scope for this review",
-                kind="information",
+                kind="information", message_id="MSG-review-workspace",
             )
         ).structured_content
         self.assertEqual(result["question"]["asker_role"], "reviewer")
+
+        retry = (
+            await self.call(
+                "ticket_question_ask", ticket_id="TK-comm", agent_name="reviewer",
+                message="Retry after a lost response",
+                kind="information", message_id="MSG-review-workspace",
+            )
+        ).structured_content
+        self.assertTrue(retry["duplicate"])
+        stored = self.service.load("pursers")["tickets"]["TK-comm"]
+        self.assertEqual(
+            [item["message_id"] for item in stored["coordinator_questions"]],
+            ["MSG-review-workspace"],
+        )
+        self.principal = self.other
         with self.assertRaisesRegex(ToolError, "registered project coordinator"):
             await self.call(
                 "ticket_question_answer", ticket_id="TK-comm", agent_name="other",
                 question_id=result["question_id"], action="answer", message="no",
                 host_binding=self.binding("other"),
             )
+
+    async def test_reviewer_question_requires_exact_current_review_lease(self) -> None:
+        await self.register_coordinators("coord")
+        await self.claimed_ticket()
+        self.principal = self.reviewer
+        for lease in (
+            None,
+            {"reviewer_agent_id": self.agent_ids["other"],
+             "reviewer_principal_id": self.other.principal_id,
+             "expires_at_epoch": 4_000_000_000},
+            {"reviewer_agent_id": self.agent_ids["reviewer"],
+             "reviewer_principal_id": self.reviewer.principal_id,
+             "expires_at_epoch": 1},
+        ):
+            def set_lease(document: dict[str, object]) -> dict[str, object]:
+                ticket = document["tickets"]["TK-comm"]
+                ticket["status"] = "submitted"
+                ticket["review_lease"] = lease
+                return {}
+            self.service.mutate("pursers", set_lease)
+            with self.subTest(lease=lease):
+                with self.assertRaisesRegex(ToolError, "coordinator question requires"):
+                    await self.call(
+                        "ticket_question_ask", ticket_id="TK-comm",
+                        agent_name="reviewer", message="Cross-ticket question",
+                        kind="information",
+                    )
+
+    async def test_reviewer_cannot_ask_about_another_ticket_with_only_ticket_a_lease(
+        self,
+    ) -> None:
+        await self.register_coordinators("coord")
+        await self.claimed_ticket("TK-review-a")
+        self.principal = self.admin
+        await self.call(
+            "ticket_create", ticket_id="TK-review-b", agent_name="admin-agent",
+            title="Second submitted ticket", description="Cross-ticket denial target",
+            scope="interactive-no-send", required_fields=["test_output"],
+            unassigned=True,
+        )
+
+        def submit_with_review_lease(document: dict[str, object]) -> dict[str, object]:
+            ticket_a = document["tickets"]["TK-review-a"]
+            ticket_a["status"] = "submitted"
+            ticket_a["review_lease"] = {
+                "reviewer_agent_id": self.agent_ids["reviewer"],
+                "reviewer_agent_name": "reviewer",
+                "reviewer_principal_id": self.reviewer.principal_id,
+                "expires_at_epoch": 4_000_000_000,
+            }
+            document["tickets"]["TK-review-b"]["status"] = "submitted"
+            return {}
+
+        self.service.mutate("pursers", submit_with_review_lease)
+        before_b = self.service.load("pursers")["tickets"]["TK-review-b"]
+        before_dispatch = before_b.get("dispatch_state")
+        self.principal = self.reviewer
+        with self.assertRaisesRegex(ToolError, "coordinator question requires"):
+            await self.call(
+                "ticket_question_ask", ticket_id="TK-review-b",
+                agent_name="reviewer", message="Ask across review leases",
+                kind="information", message_id="MSG-cross-ticket-review",
+            )
+
+        after = self.service.load("pursers")["tickets"]["TK-review-b"]
+        self.assertEqual(after.get("coordinator_questions", []), [])
+        self.assertEqual(after.get("dispatch_state"), before_dispatch)
+        self.assertEqual(after["status"], "submitted")
+        self.assertEqual(
+            self.service.load("pursers")["tickets"]["TK-review-a"]
+            ["review_lease"]["reviewer_agent_id"],
+            self.agent_ids["reviewer"],
+        )
+
+    async def test_read_only_principal_without_review_scope_cannot_ask(self) -> None:
+        await self.register_coordinators("coord")
+        await self.claimed_ticket()
+        reader = central.Principal(
+            "PR-reader-only", "reader-only", frozenset({"board:read"})
+        )
+        self.principal = reader
+        self.assertEqual(reader.scopes, frozenset({"board:read"}))
+
+        before = self.service.load("pursers")["tickets"]["TK-comm"]
+        before_dispatch = before.get("dispatch_state")
+        with self.assertRaisesRegex(
+            ToolError, "authenticated principal lacks board:coordinate authorization"
+        ):
+            await self.call(
+                "ticket_question_ask", ticket_id="TK-comm",
+                agent_name=reader.canonical, message="Read-only question",
+                kind="information", message_id="MSG-read-only-question",
+            )
+
+        after = self.service.load("pursers")["tickets"]["TK-comm"]
+        self.assertEqual(after.get("coordinator_questions", []), [])
+        self.assertEqual(after.get("dispatch_state"), before_dispatch)
+
+    async def test_reviewer_question_reporting_rpc_failure_does_not_change_scopes(self) -> None:
+        await self.register_coordinators("coord")
+        await self.claimed_ticket()
+        def set_lease(document: dict[str, object]) -> dict[str, object]:
+            ticket = document["tickets"]["TK-comm"]
+            ticket["status"] = "submitted"
+            ticket["review_lease"] = {
+                "reviewer_agent_id": self.agent_ids["reviewer"],
+                "reviewer_agent_name": "reviewer",
+                "reviewer_principal_id": self.reviewer.principal_id,
+                "expires_at_epoch": 4_000_000_000,
+            }
+            return {}
+        self.service.mutate("pursers", set_lease)
+        self.principal = self.admin
+        await self.call(
+            "board_state_update", agent_name="admin-agent",
+            key=central.PROJECT_COORDINATORS_STATE_KEY, value="{}",
+        )
+        self.principal = self.reviewer
+        with self.assertRaisesRegex(ToolError, "no project coordinator is registered"):
+            await self.call(
+                "ticket_question_ask", ticket_id="TK-comm", agent_name="reviewer",
+                message="bounded context failure", kind="information",
+            )
+        ticket = self.service.load("pursers")["tickets"]["TK-comm"]
+        self.assertIsNotNone(ticket.get("review_lease"))
+        self.assertEqual(ticket["status"], "submitted")
 
     async def test_worker_cannot_read_the_inbox_or_answer(self) -> None:
         await self.register_coordinators("coord")

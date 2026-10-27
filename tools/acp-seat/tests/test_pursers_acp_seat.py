@@ -696,8 +696,9 @@ def test_runtime_creates_standalone_ticket_clone(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("symlinked_launcher", [False, True])
 def test_production_sandbox_boundary_allows_standalone_clone_commit(
-    tmp_path: Path,
+    tmp_path: Path, symlinked_launcher: bool,
 ) -> None:
     repository = tmp_path / "source"
     repository.mkdir()
@@ -722,6 +723,18 @@ def test_production_sandbox_boundary_allows_standalone_clone_commit(
     operator_git_config.write_text("operator work identity\n", encoding="utf-8")
     scratch = tmp_path / "scratch"
     scratch.mkdir()
+    links = tmp_path / "runtime-links"
+    links.mkdir()
+    unrelated_file = links / "private.txt"
+    unrelated_file.write_text("operator-only data\n", encoding="utf-8")
+    python_executable = sys.executable
+    if symlinked_launcher:
+        intermediate = links / "python"
+        intermediate.symlink_to(sys.executable)
+        launcher = tmp_path / "launcher" / "python"
+        launcher.parent.mkdir()
+        launcher.symlink_to(intermediate)
+        python_executable = str(launcher)
     agent_code = f"""
 import os
 import subprocess
@@ -740,6 +753,12 @@ except PermissionError:
     pass
 else:
     raise AssertionError("operator Git config escaped the sandbox")
+try:
+    Path({str(unrelated_file)!r}).read_text(encoding="utf-8")
+except PermissionError:
+    pass
+else:
+    raise AssertionError("executable path traversal exposed unrelated data")
 Path("result.txt").write_text("complete\\n")
 subprocess.run(["git", "add", "result.txt"], check=True)
 subprocess.run(["git", "commit", "-m", "complete work"], check=True)
@@ -760,7 +779,7 @@ subprocess.run(["git", "commit", "-m", "complete work"], check=True)
             },
         )
         command = seat.sandboxed_agent_command(
-            [sys.executable, "-c", agent_code],
+            [python_executable, "-c", agent_code],
             work,
             protected_files=[operator_git_config],
         )

@@ -265,16 +265,18 @@ def _validate_budget(field: str, value: Any) -> dict[str, Any]:
     )
     if raw["period"] not in {"hour", "day", "month"}:
         raise ValueError(f"{field}.period is invalid")
-    return {
-        "period": raw["period"],
-        "max_tokens": _bounded_int(f"{field}.max_tokens", raw["max_tokens"], 0, 1_000_000_000),
-        "max_cost_microunits": _bounded_int(
-            f"{field}.max_cost_microunits", raw["max_cost_microunits"], 0, 1_000_000_000_000
-        ),
-        "max_external_calls": _bounded_int(
-            f"{field}.max_external_calls", raw["max_external_calls"], 0, 1_000_000
-        ),
-    }
+    # An explicit null removes this periodic cap; zero remains a zero allowance.
+    result = {"period": raw["period"]}
+    for key, maximum in (
+        ("max_tokens", 1_000_000_000),
+        ("max_cost_microunits", 1_000_000_000_000),
+        ("max_external_calls", 1_000_000),
+    ):
+        result[key] = (
+            None if raw[key] is None
+            else _bounded_int(f"{field}.{key}", raw[key], 0, maximum)
+        )
+    return result
 
 
 def _validate_connector(field: str, value: Any) -> dict[str, Any]:
@@ -507,7 +509,8 @@ def validate_config(value: Any, board_id: str) -> dict[str, Any]:
     if host_concurrency > max_host or board_concurrency > max_board:
         raise ValueError("desired concurrency exceeds immutable envelope")
     if desired_budget["period"] != max_budget["period"] or any(
-        desired_budget[key] > max_budget[key]
+        max_budget[key] is not None
+        and (desired_budget[key] is None or desired_budget[key] > max_budget[key])
         for key in ("max_tokens", "max_cost_microunits", "max_external_calls")
     ):
         raise ValueError("desired budget exceeds immutable envelope")

@@ -163,6 +163,7 @@ async def test_ticket_reader_uses_archived_status_pages_and_bounded_full_batches
             "status": "closed",
             "title": "one",
             "review_verdict": "approve",
+            "submission_history": [],
         },
         {"ticket_id": "TK-two", "status": "open", "title": "two"},
     ]
@@ -189,6 +190,8 @@ async def test_ticket_reader_splits_oversized_status_by_retired_assignees() -> N
             "title": "ticket",
             "assigned_to_agent_id": "AI-a" if index % 2 == 0 else "AI-b",
             "assigned_to": "retired-a" if index % 2 == 0 else "retired-b",
+            "review_verdict": "approve",
+            "submission_history": [],
         }
         for index in range(674)
     ]

@@ -36,6 +36,7 @@ TICKET_STATUSES = (
 DEFAULT_THRESHOLD = 0.90
 TICKET_BATCH_SIZE = 25
 TICKET_PAGE_LIMIT = 500
+TICKET_MAX_PAGES = 100
 DEFAULT_AUDIT_AGENT_NAME = "stranded-approvals-audit"
 DEFAULT_AUDIT_AGENT_PLATFORM = "stranded-approvals"
 DEFAULT_AUDIT_TASK_FOCUS = "read-only stranded approval audit"
@@ -44,11 +45,18 @@ DEFAULT_AUDIT_TASK_FOCUS = "read-only stranded approval audit"
 class AuditError(RuntimeError):
     """Raised when the audit cannot prove it inspected complete inputs."""
 
+    def __init__(self, message: str, *, original_error_class: str | None = None, original_error_code: str | None = None) -> None:
+        super().__init__(message)
+        self.original_error_class = original_error_class
+        self.original_error_code = original_error_code
+
 
 class TicketClient(Protocol):
     async def ticket_list(self, **arguments: Any) -> dict[str, Any]: ...
 
     async def board_status(self, **arguments: Any) -> dict[str, Any]: ...
+
+    async def ticket_get(self, ticket_id: str, **arguments: Any) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -101,7 +109,7 @@ def _ticket_page(
         raise AuditError(f"{label}: board response contained a non-object ticket")
     count = result.get("count")
     total = result.get("total_matching")
-    if count != len(rows) or not isinstance(total, int):
+    if type(count) is not int or count != len(rows) or type(total) is not int or total < len(rows):
         raise AuditError(f"{label}: board response has invalid counts")
     return rows, total
 
@@ -133,24 +141,77 @@ def _status_assignees(result: Mapping[str, Any]) -> list[str]:
     return sorted(selectors)
 
 
+async def _complete_ticket_pages(
+    client: TicketClient,
+    *,
+    label: str,
+    first: Mapping[str, Any] | None = None,
+    **arguments: Any,
+) -> list[dict[str, Any]]:
+    """Traverse bounded live pages without treating deduplication as completeness."""
+    page = first if first is not None else await client.ticket_list(**arguments)
+    total: int | None = None
+    rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_cursors: set[str] = set()
+    for page_number in range(1, TICKET_MAX_PAGES + 1):
+        current, matching = _ticket_page(page, label=label)
+        if total is None:
+            total = matching
+        elif matching != total:
+            raise AuditError(f"{label}: total_matching changed during traversal")
+        for row in current:
+            ticket_id = row.get("ticket_id")
+            if not isinstance(ticket_id, str) or not ticket_id:
+                raise AuditError(f"{label}: ticket omitted ticket_id")
+            if ticket_id in seen_ids:
+                raise AuditError(f"{label}: duplicate ticket {ticket_id}")
+            seen_ids.add(ticket_id)
+            rows.append(row)
+        cursor = page.get("next_cursor")
+        if cursor is not None and (
+            not isinstance(cursor, str) or not cursor or cursor in seen_cursors
+        ):
+            raise AuditError(f"{label}: invalid cursor sequence")
+        if "has_more" in page and (
+            type(page["has_more"]) is not bool
+            or page["has_more"] != (cursor is not None)
+        ):
+            raise AuditError(f"{label}: inconsistent continuation metadata")
+        if len(rows) > total or (cursor is not None and len(rows) >= total):
+            raise AuditError(f"{label}: continuation exceeds total_matching")
+        if cursor is None:
+            if len(rows) != total:
+                raise AuditError(f"{label}: ticket pages covered {len(rows)} of {total} tickets")
+            return rows
+        if not current:
+            raise AuditError(f"{label}: empty continuation page")
+        if page_number == TICKET_MAX_PAGES:
+            raise AuditError(f"{label}: ticket traversal page limit exceeded")
+        seen_cursors.add(cursor)
+        page = await client.ticket_list(**arguments, cursor=cursor)
+    raise AuditError(f"{label}: ticket traversal page limit exceeded")
+
+
 async def _complete_status_page(
     client: TicketClient, status: str
 ) -> list[dict[str, Any]]:
-    result = await client.ticket_list(
+    arguments = dict(
         status=status,
         include_closed=True,
         include_archived=True,
         limit=TICKET_PAGE_LIMIT,
         view="summary",
     )
+    result = await client.ticket_list(**arguments)
     rows, total = _ticket_page(result, label=f"status {status}")
-    if total == len(rows):
-        return rows
+    if "next_cursor" in result or total == len(rows):
+        return await _complete_ticket_pages(
+            client, label=f"status {status}", first=result, **arguments
+        )
 
-    # ticket_list has no cursor today.  The initial bounded page is retained as
-    # the unassigned/unknown-assignee pass, then stable agent identities from
-    # board_status fill in omitted assigned rows.  The final total check stays
-    # fail-closed, including the case where one assignee alone exceeds 500.
+    # Older servers have no cursor: retain the independently counted, fail-closed
+    # assignee split. An incomplete full-ID page still cannot be trusted.
     status_result = await client.board_status(include_retired=True)
     by_id: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -183,6 +244,66 @@ async def _complete_status_page(
     return [by_id[ticket_id] for ticket_id in sorted(by_id)]
 
 
+def _approval_metadata_ambiguous(ticket: Mapping[str, Any]) -> bool:
+    return ticket.get("review_verdict") is None and (
+        bool(ticket.get("archived")) or ticket.get("status") == "closed"
+    )
+
+
+def _approval_sections_omitted(ticket: Mapping[str, Any]) -> bool:
+    omitted = ticket.get("omitted_sections", [])
+    return bool(ticket.get("oversized_for_list")) or not isinstance(omitted, list) or (
+        bool(set(str(item) for item in omitted) & {
+            "submission_history", "review_history", "review_verdict"
+        })
+    )
+
+
+async def _complete_approval_input(
+    client: TicketClient, ticket: dict[str, Any]
+) -> dict[str, Any]:
+    ticket_id = ticket["ticket_id"]
+    if ticket.get("oversized_for_list") or ticket.get("omitted_sections") or _approval_metadata_ambiguous(ticket):
+        try:
+            result = await client.ticket_get(ticket_id, view="full")
+        except Exception as exc:
+            name = getattr(exc, "original_error_class", None) or type(exc).__name__
+            if not isinstance(name, str) or re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", name) is None:
+                name = "ApprovalError"
+            code = (getattr(exc, "original_error_code", None) or getattr(exc, "code", None)) if name == "RegistryRoutingError" else None
+            if not isinstance(code, str) or re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code) is None:
+                code = None
+            raise AuditError("full-input hydration failed", original_error_class=name, original_error_code=code) from None
+        detail = result.get("ticket") if isinstance(result, Mapping) else None
+        if not isinstance(detail, dict) or detail.get("ticket_id") != ticket_id:
+            raise AuditError(f"ticket {ticket_id}: hydration identity mismatch")
+        ticket = detail
+    if _approval_sections_omitted(ticket):
+        raise AuditError(f"ticket {ticket_id}: approval sections remain omitted")
+    if _approval_metadata_ambiguous(ticket):
+        raise AuditError(f"ticket {ticket_id}: ambiguous approval metadata")
+    for section in ("submission_history", "review_history"):
+        counter = section + "_omitted_count"
+        if counter in ticket and (type(ticket[counter]) is not int or ticket[counter] != 0):
+            # ticket_get(full) does not merge retained inline history overflow.
+            # No bounded history recovery is supported by this audit client.
+            raise AuditError(f"ticket {ticket_id}: incomplete {section}")
+        history = ticket.get(section)
+        if history is not None and (
+            not isinstance(history, list)
+            or any(not isinstance(row, Mapping) for row in history)
+        ):
+            raise AuditError(f"ticket {ticket_id}: invalid {section}")
+    reviewed = ticket.get("review_history")
+    if isinstance(reviewed, list) and reviewed and "review_verdict" not in ticket:
+        raise AuditError(f"ticket {ticket_id}: reviewed ticket omitted review_verdict")
+    if ticket.get("review_verdict") == "approve" and not isinstance(ticket.get("submission_history"), list):
+        raise AuditError(f"ticket {ticket_id}: approved ticket omitted submission_history")
+    # Unreviewed tickets legitimately have no verdict or history. Legacy approved
+    # submissions with no parseable reference remain explicitly UNVERIFIABLE.
+    return ticket
+
+
 async def fetch_all_tickets(client: TicketClient) -> list[dict[str, Any]]:
     """Read every ticket using bounded status and ticket-id pages."""
     probe = await client.ticket_list(
@@ -192,10 +313,11 @@ async def fetch_all_tickets(client: TicketClient) -> list[dict[str, Any]]:
         view="summary",
     )
     total = probe.get("total_matching")
-    if not isinstance(total, int):
+    if type(total) is not int or total < 0:
         raise AuditError("all-ticket probe omitted total_matching")
 
     ticket_ids: list[str] = []
+    expected_statuses: dict[str, str] = {}
     seen: set[str] = set()
     for status in TICKET_STATUSES:
         for ticket in await _complete_status_page(client, status):
@@ -204,7 +326,10 @@ async def fetch_all_tickets(client: TicketClient) -> list[dict[str, Any]]:
                 raise AuditError(f"status {status}: ticket omitted ticket_id")
             if ticket_id in seen:
                 raise AuditError(f"ticket {ticket_id} appeared in multiple status pages")
+            if ticket.get("status") != status:
+                raise AuditError(f"ticket {ticket_id}: status changed during traversal")
             seen.add(ticket_id)
+            expected_statuses[ticket_id] = status
             ticket_ids.append(ticket_id)
     if len(ticket_ids) != total:
         raise AuditError(
@@ -214,14 +339,15 @@ async def fetch_all_tickets(client: TicketClient) -> list[dict[str, Any]]:
 
     tickets: list[dict[str, Any]] = []
     for chunk in _chunks(sorted(ticket_ids)):
-        result = await client.ticket_list(
+        rows = await _complete_ticket_pages(
+            client,
+            label=f"ticket batch {chunk[0]}",
             ticket_ids=chunk,
             include_closed=True,
             include_archived=True,
             limit=len(chunk),
             view="full",
         )
-        rows = _ticket_rows(result, label=f"ticket batch {chunk[0]}")
         returned = {str(row.get("ticket_id")) for row in rows}
         if returned != set(chunk):
             missing = sorted(set(chunk) - returned)
@@ -229,7 +355,11 @@ async def fetch_all_tickets(client: TicketClient) -> list[dict[str, Any]]:
             raise AuditError(
                 f"ticket batch mismatch: missing={missing} extra={extra}"
             )
-        tickets.extend(rows)
+        for row in rows:
+            ticket = await _complete_approval_input(client, row)
+            if ticket.get("status") != expected_statuses[ticket["ticket_id"]]:
+                raise AuditError(f"ticket {ticket['ticket_id']}: status changed during traversal")
+            tickets.append(ticket)
     return tickets
 
 

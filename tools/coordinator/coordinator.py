@@ -121,6 +121,18 @@ class Project:
     public: bool = False
     domain: str = "personal"
     delivery_branch: str | None = None
+    status: str = "active"
+    work_dir_owner: str = "operator"
+    fleet_clone_dir: str | None = None
+    repository_url: str | None = None
+    delivery_workflow: dict[str, Any] | None = None
+    delivery_policy: dict[str, Any] | None = None
+    delivery_policy_group: str | None = None
+    delivery_policy_activation: dict[str, Any] | None = None
+    butler_workflow: dict[str, Any] | None = None
+    butler_workflow_activation: dict[str, Any] | None = None
+    butler_workflow_error: str | None = None
+    final_validation_delivery: str = "require_pass"
 
 
 @dataclass(frozen=True)
@@ -460,6 +472,18 @@ def parse_registry(raw: Mapping[str, Any]) -> list[Project]:
                 public=row.get("public") is True,
                 domain=domain,
                 delivery_branch=delivery_branch,
+                status=str(row.get("status", "active")),
+                work_dir_owner=str(row.get("work_dir_owner", "operator")),
+                fleet_clone_dir=row.get("fleet_clone_dir"),
+                repository_url=row.get("repository_url"),
+                delivery_workflow=row.get("delivery_workflow"),
+                delivery_policy=row.get("delivery_policy"),
+                delivery_policy_group=row.get("delivery_policy_group"),
+                delivery_policy_activation=row.get("delivery_policy_activation"),
+                butler_workflow=row.get("butler_workflow"),
+                butler_workflow_activation=row.get("butler_workflow_activation"),
+                butler_workflow_error=row.get("butler_workflow_error"),
+                final_validation_delivery=row.get("final_validation_delivery", "require_pass"),
             )
         )
     return sorted(projects, key=lambda item: (item.board_id, item.name))
@@ -2732,6 +2756,299 @@ async def read_registry(reader: RawReader, home_board: str) -> list[Project]:
     return parse_registry(registry)
 
 
+MAX_TICKET_LIST_PAGES = 100
+MAX_TICKET_HYDRATIONS = 32
+TICKET_HYDRATION_TIMEOUT_SECONDS = 10.0
+
+
+def _operational_time(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).tzinfo is not None
+    except ValueError:
+        return False
+
+
+def _operational_identity(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", value) is not None
+
+
+def _operational_offer(value: Any, ticket_id: str, kind: str | None = None) -> bool:
+    if not isinstance(value, Mapping) or value.get("state", "offered") != "offered":
+        return False
+    if (
+        value.get("ticket_id") != ticket_id
+        or value.get("kind") not in ("work", "review")
+        or (kind is not None and value["kind"] != kind)
+        or not _operational_identity(value.get("agent_id"))
+        or not _operational_identity(value.get("agent_name"))
+        or not _operational_time(value.get("offered_at"))
+        or not _operational_time(value.get("expires_at"))
+        or type(value.get("cycle")) is not int or value["cycle"] < 0
+        or type(value.get("expires_at_epoch")) not in (int, float)
+    ):
+        return False
+    offered = parse_time(value["offered_at"])
+    expires = parse_time(value["expires_at"])
+    # iso_at rounds epoch floats to datetime microseconds. Already-expired
+    # offers remain legitimate observations, but cannot predate their offer.
+    return offered <= expires and abs(value["expires_at_epoch"] - expires.timestamp()) <= 0.000001
+
+
+def _operational_dispatch(value: Any, ticket_id: str) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, Mapping):
+        return False
+    state = value.get("state")
+    if state == "offered":
+        return _operational_offer(value, ticket_id)
+    if state not in {
+        "broadcast", "unassignable", "claimed", "review_claimed", "parked",
+        "needs_human", "reopened", "closed", "rejected", "canceled",
+    }:
+        return False
+    if state != "unassignable" and not _operational_time(value.get("at")):
+        return False
+    if state in {"broadcast", "unassignable", "claimed", "review_claimed", "closed", "rejected"}:
+        if value.get("kind") not in ("work", "review"):
+            return False
+    if state == "claimed" and value["kind"] != "work":
+        return False
+    if state in {"review_claimed", "closed", "rejected"} and value["kind"] != "review":
+        return False
+    if state == "parked" and ("kind" not in value or value["kind"] not in (None, "work", "review")):
+        return False
+    if state in {"broadcast", "unassignable", "reopened"}:
+        if not isinstance(value.get("reason"), str) or not value["reason"].strip():
+            return False
+    if state == "broadcast" and (type(value.get("cycle")) is not int or value["cycle"] < 0):
+        return False
+    if "pin_unavailable_cycles" in value and (
+        type(value["pin_unavailable_cycles"]) is not int or value["pin_unavailable_cycles"] < 0
+    ):
+        return False
+    if state in {"claimed", "review_claimed"} and not _operational_identity(value.get("agent_id")):
+        return False
+    if state == "needs_human" and not _operational_identity(value.get("request_id")):
+        return False
+    # Optional fields still cannot carry malformed holder/time evidence.
+    for key in ("agent_id", "agent_name", "request_id"):
+        if key in value and not _operational_identity(value[key]):
+            return False
+    for key in ("at", "expires_at", "offered_at"):
+        if key in value and not _operational_time(value[key]):
+            return False
+    return True
+
+
+def _operational_holders(row: Mapping[str, Any]) -> bool:
+    claim_keys = ("claimed_by_agent_id", "claimed_by", "claimed_by_principal_id")
+    active_claim = row["status"] in {"claimed", "in_progress", "creating_report", "reviewing"}
+    if active_claim and not all(_operational_identity(row.get(key)) for key in claim_keys):
+        return False
+    for key in claim_keys:
+        if key in row and row[key] is not None and not _operational_identity(row[key]):
+            return False
+    if active_claim and (
+        not _operational_time(row.get("lease_expires_at"))
+        or type(row.get("ttl_s")) is not int or row["ttl_s"] <= 0
+    ):
+        return False
+    if "lease_expires_at" in row and row["lease_expires_at"] is not None:
+        if not _operational_time(row["lease_expires_at"]):
+            return False
+    lease = row.get("review_lease")
+    if lease is None:
+        return True
+    if not isinstance(lease, Mapping) or not all(
+        _operational_identity(lease.get(key))
+        for key in ("reviewer_agent_id", "reviewer_agent_name", "reviewer_principal_id")
+    ):
+        return False
+    if (
+        not all(_operational_time(lease.get(key)) for key in ("claimed_at", "renewed_at", "expires_at"))
+        or type(lease.get("ttl_s")) is not int or lease["ttl_s"] <= 0
+        or type(lease.get("expires_at_epoch")) not in (int, float)
+    ):
+        return False
+    claimed = parse_time(lease["claimed_at"])
+    renewed = parse_time(lease["renewed_at"])
+    expires = parse_time(lease["expires_at"])
+    # Central renew_review_lease adds ttl_s to the renewal epoch before iso_at
+    # rounds both timestamps. Two rounding errors fit within one microsecond.
+    return (
+        claimed <= renewed <= expires
+        and abs((expires - renewed).total_seconds() - lease["ttl_s"]) <= 0.000001
+        and abs(lease["expires_at_epoch"] - expires.timestamp()) <= 0.000001
+    )
+
+
+def _operational_ticket_complete(row: Mapping[str, Any]) -> bool:
+    required = {
+        "ticket_id", "status", "priority", "parked", "tier", "tags",
+        "created_at", "dispatch_state",
+    }
+    if not required <= row.keys():
+        return False
+    if "oversized_for_list" in row and row["oversized_for_list"] is not False:
+        return False
+    if "omitted_sections" in row and (
+        not isinstance(row["omitted_sections"], list) or row["omitted_sections"]
+    ):
+        return False
+    if (
+        not isinstance(row["ticket_id"], str) or not row["ticket_id"].strip()
+        or not isinstance(row["status"], str)
+        or row["status"] not in {
+            "open", "claimed", "in_progress", "creating_report", "submitted",
+            "reviewing", "in_review", "needs_human", "closed", "rejected",
+            "canceled", "terminated",
+        }
+        or row["priority"] not in ("low", "medium", "high", "critical")
+        or type(row["parked"]) is not bool
+        or not isinstance(row["tags"], list)
+        or any(not isinstance(tag, str) for tag in row["tags"])
+        or parse_time(row["created_at"]) is None
+    ):
+        return False
+    # A missing tier is a projection defect; a present invalid tier must reach
+    # the fleet's independent fail-closed validator unchanged, never defaulted.
+    request = row.get("human_request")
+    if request is not None and (
+        not isinstance(request, Mapping) or "resolution" not in request
+        or (request["resolution"] is not None and not isinstance(request["resolution"], Mapping))
+    ):
+        return False
+    if not _operational_dispatch(row["dispatch_state"], row["ticket_id"]):
+        return False
+    for key, kind in (("current_offer", None), ("work_offer", "work"), ("review_offer", "review")):
+        if row.get(key) is not None and not _operational_offer(row[key], row["ticket_id"], kind):
+            return False
+    return _operational_holders(row)
+
+
+async def _read_complete_ticket_list(
+    reader: RawReader, board_id: str, include_closed: bool,
+    budget: dict[str, Any],
+) -> list[dict[str, Any]] | None:
+    """Read bounded work pages at one watermark, then hydrate remaining stubs.
+
+    Byte-heavy pages are retried with a smaller limit before spending the
+    shared detail budget. Count, page and time limits include both board lists.
+    """
+    try:
+        recovered: list[dict[str, Any]] = []
+        identities: set[str] = set()
+        cursors: set[str] = set()
+        cursor: str | None = None
+        limit = 500
+        watermark: int | None = None
+        total: int | None = None
+        while True:
+            remaining = budget["deadline"] - time.monotonic()
+            if remaining <= 0 or budget.get("pages", 0) >= MAX_TICKET_LIST_PAGES:
+                return None
+            budget["pages"] = budget.get("pages", 0) + 1
+            arguments = dict(include_closed=include_closed, limit=limit, view="work")
+            if cursor is not None:
+                arguments["cursor"] = cursor
+            active = await asyncio.wait_for(
+                reader.call("ticket_list", board_id, **arguments), timeout=remaining,
+            )
+            if not isinstance(active, Mapping) or active.get("ok") is not True:
+                return None
+            rows = active.get("tickets")
+            counts = [active.get(key) for key in ("count", "returned_count", "total_matching")]
+            next_cursor = active.get("next_cursor")
+            if (
+                not isinstance(rows, list)
+                or any(type(count) is not int or count < 0 for count in counts)
+                or counts[0] != len(rows) or counts[1] != len(rows)
+                or counts[2] < len(rows) or len(rows) > limit
+                or type(active.get("has_more")) is not bool
+                or "next_cursor" not in active
+                or (next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor))
+                or active["has_more"] != (next_cursor is not None)
+                or active.get("view") != "work"
+                or active.get("include_dispatch_history") is not False
+                or active.get("read_consistency") != "live"
+                or type(active.get("watermark")) is not int or active["watermark"] < 0
+                or type(active.get("latest_seq")) is not int
+                or active["latest_seq"] != active["watermark"]
+                or active.get("filters") != {
+                    "status": None, "assigned_to": None,
+                    "include_closed": include_closed, "include_archived": True,
+                    "review_unclaimed_only": False, "ticket_ids": None,
+                }
+            ):
+                return None
+            filters = active["filters"]
+            if any(type(filters[key]) is not bool for key in (
+                "include_closed", "include_archived", "review_unclaimed_only",
+            )):
+                return None
+            if watermark is None:
+                watermark, total = active["watermark"], counts[2]
+            if active["watermark"] != watermark or counts[2] != total:
+                return None
+            if next_cursor is not None and (next_cursor == cursor or next_cursor in cursors or not rows):
+                return None
+            page_ids: set[str] = set()
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    return None
+                ticket_id = row.get("ticket_id")
+                if (not isinstance(ticket_id, str)
+                        or re.fullmatch(r"[A-Za-z0-9._-]{1,80}", ticket_id) is None
+                        or ticket_id in identities or ticket_id in page_ids):
+                    return None
+                page_ids.add(ticket_id)
+            if limit > 1 and any(row.get("oversized_for_list") is True for row in rows):
+                limit = max(1, min(limit // 2, len(rows) // 2))
+                continue
+            if len(recovered) + len(rows) > total:
+                return None
+            identities.update(page_ids)
+            for row in rows:
+                if not _operational_ticket_complete(row):
+                    remaining = budget["deadline"] - time.monotonic()
+                    if budget["calls"] >= MAX_TICKET_HYDRATIONS or remaining <= 0:
+                        return None
+                    budget["calls"] += 1
+                    detail = await asyncio.wait_for(
+                        reader.call("ticket_get", board_id, ticket_id=row["ticket_id"], view="work"),
+                        timeout=remaining,
+                    )
+                    if (not isinstance(detail, Mapping) or detail.get("ok") is not True
+                            or detail.get("view") != "work"
+                            or detail.get("include_dispatch_history") is not False
+                            or type(detail.get("latest_seq")) is not int
+                            or detail["latest_seq"] != watermark):
+                        return None
+                    budget["bytes"] += len(json.dumps(detail, ensure_ascii=False).encode("utf-8"))
+                    if budget["bytes"] > MAX_SNAPSHOT_BYTES:
+                        return None
+                    hydrated = detail.get("ticket")
+                    if (not isinstance(hydrated, Mapping)
+                            or hydrated.get("ticket_id") != row["ticket_id"]
+                            or not _operational_ticket_complete(hydrated)):
+                        return None
+                    row = hydrated
+                if not include_closed and row["status"] in {"closed", "rejected", "canceled", "terminated"}:
+                    return None
+                recovered.append(dict(row))
+            if next_cursor is None:
+                return recovered if len(recovered) == total else None
+            if len(recovered) >= total:
+                return None
+            cursors.add(next_cursor)
+            cursor = next_cursor
+    except Exception:
+        return None
+
+
 async def read_board(
     reader: RawReader, board_id: str, home_board: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -2753,32 +3070,25 @@ async def read_board(
             "omitted_counts": {"agents": 1, "tickets": 1},
         }
     else:
-        try:
-            active = await reader.call(
-                "ticket_list", board_id, include_closed=False, limit=500
-            )
-        except Exception:
-            active = {}
-        if active.get("count") == active.get("total_matching"):
-            snapshot["coordination_tickets"] = [
-                row
-                for row in active.get("tickets", [])
-                if isinstance(row, Mapping)
-            ]
-            snapshot["coordination_tickets_complete"] = True
-        try:
-            all_tickets = await reader.call(
-                "ticket_list", board_id, include_closed=True, limit=500
-            )
-        except Exception:
-            all_tickets = {}
-        if all_tickets.get("count") == all_tickets.get("total_matching"):
-            snapshot["intake_tickets"] = [
-                row
-                for row in all_tickets.get("tickets", [])
-                if isinstance(row, Mapping)
-            ]
-            snapshot["intake_tickets_complete"] = True
+        budget = {
+            "calls": 0, "bytes": 0,
+            "deadline": time.monotonic() + TICKET_HYDRATION_TIMEOUT_SECONDS,
+        }
+        for include_closed, key in ((False, "coordination_tickets"), (True, "intake_tickets")):
+            rows = await _read_complete_ticket_list(reader, board_id, include_closed, budget)
+            snapshot[f"{key}_complete"] = rows is not None
+            if rows is not None:
+                snapshot[key] = rows
+            else:
+                snapshot.pop(key, None)
+                if not include_closed:
+                    # Consumers already fence fleet/dispatch on truncation plus
+                    # completeness. Never fall back to an unverified snapshot.
+                    snapshot["truncated"] = True
+                    omitted = snapshot.get("omitted_counts")
+                    omitted = dict(omitted) if isinstance(omitted, Mapping) else {}
+                    omitted["tickets"] = max(1, omitted.get("tickets", 0))
+                    snapshot["omitted_counts"] = omitted
     try:
         prior = await reader.call("board_state_get", board_id, key=STATE_KEY)
     except Exception as exc:  # Missing optional state or an unavailable board.

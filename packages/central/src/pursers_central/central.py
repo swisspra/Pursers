@@ -752,6 +752,8 @@ def compact_write_response(
 
 
 def _history_count(ticket: Mapping[str, Any], field: str) -> int:
+    if field == "annotations" and type(ticket.get("annotation_count")) is int and ticket["annotation_count"] >= 0:
+        return ticket["annotation_count"]
     entries = ticket.get(field)
     inline = len(entries) if isinstance(entries, list) else 0
     omitted = ticket.get(f"{field}_omitted_count", 0)
@@ -966,7 +968,8 @@ def project_ticket_read(
     for key in (
         "tags", "related_files", "target_url", "project", "tier",
         "skills_required", "work_offer", "review_offer", "review_lease",
-        "review_state", "human_request", "claimed_by", "claimed_by_agent_id",
+        "review_state", "review_claimed_by", "review_lease_expires_at",
+        "human_request", "claimed_by", "claimed_by_agent_id",
         "claimed_by_principal_id",
         "last_claimed_by", "last_claimed_by_agent_id",
         "last_claimed_by_principal_id", "last_claimed_at",
@@ -1105,15 +1108,33 @@ def project_model_tool_result(
         and isinstance(board_id, str)
         and ID_RE.fullmatch(board_id)
     ):
-        projected = project_ticket_read_response(
-            projected,
-            service=service,
-            board_id=board_id,
-            view=str(arguments.get("view", DEFAULT_TICKET_READ_VIEW)),
-            include_dispatch_history=bool(
-                arguments.get("include_dispatch_history", False)
-            ),
-        )
+        view = str(arguments.get("view", "summary" if tool_name == "ticket_list" else DEFAULT_TICKET_READ_VIEW))
+        # ticket_list has already projected its rows while enforcing its byte
+        # budget. Re-projecting a summary would erase its history counts.
+        if tool_name != "ticket_list" or projected.get("view") != view:
+            projected = project_ticket_read_response(
+                projected,
+                service=service,
+                board_id=board_id,
+                view=view,
+                include_dispatch_history=bool(
+                    arguments.get("include_dispatch_history", False)
+                ),
+            )
+        projected["read_guidance"] = {
+            "detail_tool": "ticket_get",
+            "detail_view": "full",
+            "history_tool": "ticket_history_list",
+        }
+        if tool_name == "ticket_list":
+            projected["read_guidance"]["instruction"] = (
+                "Summaries are not full evidence. Open one ticket with view=full for exact details. "
+                "Page retained annotations, submissions, reviews, dispatch or progress with "
+                "ticket_history_list. Follow next_cursor unchanged with the same filters and view "
+                "when the task requires every matching ticket; do not infer board-wide absence "
+                "from one page. Historical unavailability is reported explicitly."
+            )
+            projected["read_guidance"]["page_complete"] = not projected.get("has_more", False)
         projected = abbreviate_response_ids(projected)
     if (
         not is_error
@@ -3508,6 +3529,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
     mcp = PursersMCPServer(
         "On Board Central Skeleton",
+        instructions=(
+            "Start with summary ticket pages. Follow next_cursor unchanged with the same filters "
+            "and view when every matching ticket is needed; one page is not the whole board. "
+            "Use ticket_get(view=full) for one exact ticket and ticket_history_list for retained "
+            "evidence. A truncated snapshot or summary is not full evidence."
+        ),
         version="0.1.0a9",
         token_verifier=token_verifier,
         auth=AuthSettings(
@@ -3834,8 +3861,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     ) -> bool:
         for ticket in document.get("tickets", {}).values():
             if (
-                ticket.get("status") in PRE_SUBMISSION_STATES
-                and ticket.get("claimed_by_agent_id") == agent_id_value
+                ticket.get("claimed_by_agent_id") == agent_id_value
+                and (
+                    ticket.get("status") in PRE_SUBMISSION_STATES
+                    or inactive_work_ownership_is_ambiguous(ticket, now)
+                )
             ):
                 expires = ticket.get("lease_expires_at_epoch")
                 if expires is None:
@@ -4030,8 +4060,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if candidate.get("ticket_id") == excluding_ticket_id:
                 continue
             if (
-                candidate.get("status") in PRE_SUBMISSION_STATES
-                and candidate.get("claimed_by_agent_id") == agent_id_value
+                candidate.get("claimed_by_agent_id") == agent_id_value
+                and (
+                    candidate.get("status") in PRE_SUBMISSION_STATES
+                    or inactive_work_ownership_is_ambiguous(candidate, now)
+                )
             ):
                 conflicts.append(
                     {
@@ -4083,8 +4116,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if candidate.get("ticket_id") == excluding_ticket_id:
                 continue
             if (
-                candidate.get("status") in PRE_SUBMISSION_STATES
-                and candidate.get("claimed_by_agent_id") == agent_id_value
+                candidate.get("claimed_by_agent_id") == agent_id_value
+                and (
+                    candidate.get("status") in PRE_SUBMISSION_STATES
+                    or inactive_work_ownership_is_ambiguous(candidate, now)
+                )
             ):
                 return True
             lease = candidate.get("review_lease")
@@ -4329,8 +4365,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if candidate.get("ticket_id") == excluding_ticket_id:
                 continue
             if (
-                candidate.get("status") in PRE_SUBMISSION_STATES
-                and candidate.get("claimed_by_agent_id") == agent_id_value
+                candidate.get("claimed_by_agent_id") == agent_id_value
+                and (
+                    candidate.get("status") in PRE_SUBMISSION_STATES
+                    or inactive_work_ownership_is_ambiguous(candidate, now)
+                )
             ):
                 expires = candidate.get("lease_expires_at_epoch")
                 if expires is None:
@@ -4382,6 +4421,145 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             return "pinned_seat_exited"
         return "pinned_seat_unavailable"
 
+    WORK_LEASE_FIELDS = (
+        "claimed_by_agent_id", "claimed_by_principal_id", "claimed_by",
+        "claimed_at", "lease_expires_at_epoch", "lease_expires_at",
+        "lease_renewed_at", "lease_renewal_source",
+        "lease_last_model_renewed_at", "lease_keepalive_only_since", "ttl_s",
+    )
+
+    def review_lease_expiration_is_ambiguous(
+        lease: Any, now: float,
+    ) -> bool:
+        """Fail closed when a present review lease has missing or conflicting expiry."""
+        if not isinstance(lease, Mapping):
+            return True
+        epoch = lease.get("expires_at_epoch")
+        textual = lease.get("expires_at")
+        if epoch is None and textual is None:
+            return True
+        parsed_epoch: float | None = None
+        parsed_text: float | None = None
+        if epoch is not None:
+            if isinstance(epoch, bool):
+                return True
+            try:
+                parsed_epoch = float(epoch)
+            except (TypeError, ValueError, OverflowError):
+                return True
+            if not math.isfinite(parsed_epoch) or parsed_epoch > now:
+                return True
+        if textual is not None:
+            try:
+                parsed_datetime = datetime.fromisoformat(
+                    str(textual).replace("Z", "+00:00")
+                )
+                if parsed_datetime.tzinfo is None or parsed_datetime.utcoffset() is None:
+                    return True
+                parsed_text = parsed_datetime.timestamp()
+            except (TypeError, ValueError, OverflowError):
+                return True
+            if not math.isfinite(parsed_text) or parsed_text > now:
+                return True
+        if (
+            parsed_epoch is not None
+            and parsed_text is not None
+            and abs(parsed_text - parsed_epoch) > 0.001
+        ):
+            return True
+        return False
+
+    def inactive_lifecycle_has_ambiguous_live_lease(
+        ticket: Mapping[str, Any], now: float,
+    ) -> bool:
+        """Protect contradictory or malformed live lease evidence during recovery."""
+        epoch = ticket.get("lease_expires_at_epoch")
+        textual = ticket.get("lease_expires_at")
+        parsed_text: float | None = None
+        if textual is not None:
+            try:
+                parsed_datetime = datetime.fromisoformat(
+                    str(textual).replace("Z", "+00:00")
+                )
+                if parsed_datetime.tzinfo is None or parsed_datetime.utcoffset() is None:
+                    return True
+                parsed_text = parsed_datetime.timestamp()
+            except (TypeError, ValueError, OverflowError):
+                return True
+        if epoch is not None:
+            if isinstance(epoch, bool):
+                return True
+            try:
+                parsed_epoch = float(epoch)
+            except (TypeError, ValueError, OverflowError):
+                return True
+            if not math.isfinite(parsed_epoch):
+                return True
+            if parsed_epoch > now or (parsed_text is not None and parsed_text > now):
+                return True
+            if parsed_text is not None and abs(parsed_text - parsed_epoch) > 0.001:
+                return True
+        elif parsed_text is not None:
+            if parsed_text > now:
+                return True
+        if "review_lease" in ticket and review_lease_expiration_is_ambiguous(
+            ticket.get("review_lease"), now
+        ):
+            return True
+        return False
+
+    def work_ownership_needs_reconcile(ticket: Mapping[str, Any], now: float) -> bool:
+        """Whether holder metadata contradicts an inactive, lease-free lifecycle."""
+        status = ticket.get("status")
+        if status not in TERMINAL_TICKET_STATES | {"needs_human", "open"}:
+            return False
+        if inactive_lifecycle_has_ambiguous_live_lease(ticket, now):
+            return False
+        return any(ticket.get(key) is not None for key in WORK_LEASE_FIELDS)
+
+    def inactive_work_ownership_is_ambiguous(
+        ticket: Mapping[str, Any], now: float,
+    ) -> bool:
+        return (
+            ticket.get("status") in TERMINAL_TICKET_STATES | {"needs_human", "open"}
+            and any(ticket.get(key) is not None for key in WORK_LEASE_FIELDS)
+            and inactive_lifecycle_has_ambiguous_live_lease(ticket, now)
+        )
+
+    def reconcile_inactive_work_ownership(
+        document: dict[str, Any], ticket: dict[str, Any], now: float,
+    ) -> bool:
+        """Move proven-inactive ownership into audit metadata, retaining history."""
+        if not work_ownership_needs_reconcile(ticket, now):
+            return False
+        prior_agent = ticket.get("claimed_by_agent_id")
+        prior_principal = ticket.get("claimed_by_principal_id")
+        prior_name = ticket.get("claimed_by")
+        prior_at = ticket.get("claimed_at")
+        if prior_agent is not None:
+            ticket["last_claimed_by_agent_id"] = prior_agent
+        if prior_principal is not None:
+            ticket["last_claimed_by_principal_id"] = prior_principal
+        if prior_name is not None:
+            ticket["last_claimed_by"] = prior_name
+        if prior_at is not None:
+            ticket["last_claimed_at"] = prior_at
+        ticket.setdefault("last_release_reason", "inactive ticket lifecycle")
+        for key in WORK_LEASE_FIELDS:
+            ticket.pop(key, None)
+        append_bounded_history(
+            document, ticket, "dispatch_history",
+            {
+                "state": "work_ownership_reconciled",
+                "reason": "inactive_ticket_lifecycle",
+                "prior_agent_id": prior_agent,
+                "prior_principal_id": prior_principal,
+                "at": iso_at(now),
+            },
+        )
+        ticket["updated_at"] = iso_at(now)
+        return True
+
     def invalid_dispatch_offer_reason(
         document: Mapping[str, Any], ticket: Mapping[str, Any],
         offer: Mapping[str, Any], now: float, kind: str,
@@ -4401,7 +4579,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             return "offer_recipient_ineligible"
         if not member_dispatch_ready(member, now):
             return "offer_recipient_not_dispatch_ready"
-        if kind == "work" and ticket.get("claimed_by_agent_id"):
+        if kind == "work" and inactive_work_ownership_is_ambiguous(ticket, now):
+            return "offer_conflicts_with_ambiguous_ownership"
+        if (
+            kind == "work"
+            and ticket.get("status") in PRE_SUBMISSION_STATES
+            and ticket.get("claimed_by_agent_id")
+        ):
             return "offer_conflicts_with_work_lease"
         if kind == "review" and review_lease_is_live(ticket, now):
             return "offer_conflicts_with_review_lease"
@@ -4429,6 +4613,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         reserved_agents: set[str] = set()
         events: list[dict[str, Any]] = []
         for ticket in tickets:
+            reconcile_inactive_work_ownership(document, ticket, now)
             for kind in ("work", "review"):
                 key = f"{kind}_offer"
                 offer = ticket.get(key)
@@ -4498,6 +4683,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 str(item.get("ticket_id", "")),
             ),
         ):
+            if work_ownership_needs_reconcile(ticket, now):
+                return True
+            if inactive_work_ownership_is_ambiguous(ticket, now):
+                return True
             for kind in ("work", "review"):
                 offer = ticket.get(f"{kind}_offer")
                 if not isinstance(offer, Mapping):
@@ -4578,10 +4767,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         document: dict[str, Any], ticket: dict[str, Any], now: float, kind: str,
         *, preferred_agent_id: str | None = None,
     ) -> dict[str, Any] | None:
+        reconcile_inactive_work_ownership(document, ticket, now)
         wanted_status = "open" if kind == "work" else "submitted"
         if ticket.get("status") != wanted_status:
             return None
         if ticket.get("parked") is True:
+            return None
+        if kind == "work" and inactive_work_ownership_is_ambiguous(ticket, now):
             return None
         if kind == "review" and review_lease_is_live(ticket, now):
             return None
@@ -4920,6 +5112,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         released = auto_stale_members(document, now, redispatch=redispatch)
         recipients = service.admitted_agent_ids(document)
         for ticket in document["tickets"].values():
+            reconcile_inactive_work_ownership(document, ticket, now)
             released.extend(
                 expire_dispatch_offers(
                     document, ticket, now, redispatch=redispatch
@@ -4928,7 +5121,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             review_lease = ticket.get("review_lease")
             if isinstance(review_lease, dict):
                 review_expires = review_lease.get("expires_at_epoch")
-                if review_expires is not None and not review_lease_is_live(ticket, now):
+                if (
+                    review_expires is not None
+                    and not review_lease_is_live(ticket, now)
+                    and not review_lease_expiration_is_ambiguous(review_lease, now)
+                ):
                     expired = ticket.pop("review_lease")
                     ticket["updated_at"] = iso_at(now)
                     released.append(
@@ -8108,14 +8305,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     @tool()
     async def board_snapshot(
         board_id: str,
-        limit: int = DEFAULT_SNAPSHOT_LIMIT,
-        max_bytes: int = DEFAULT_SNAPSHOT_MAX_BYTES,
+        limit: int = 10,
+        max_bytes: int = 16_384,
         include_retired: bool = False,
     ) -> dict[str, Any]:
         """Return a bounded cold projection and exact journal splice watermark.
 
         ``limit`` caps each projected collection. ``max_bytes`` caps the UTF-8
         JSON payload; explicit counts report every omitted entry.
+        A truncated snapshot is an overview. Use cursor-paged ``ticket_list``
+        and ``ticket_get(view="full")`` for the remaining ticket evidence.
         """
         board_id = require_id("board_id", board_id)
         validate_snapshot_bounds(limit, max_bytes)
@@ -9749,24 +9948,43 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         require_scope(principal, "board:read")
         document = service.load(board_id)
         service.principal_members(document, principal.principal_id)
+        def read_projection(ticket: dict[str, Any], *, archived: bool = False) -> dict[str, Any]:
+            projected = project_ticket(board_id, ticket, document=document, principal=principal)
+            if view != "full":
+                return projected
+            archive = None if archived else service.load_archive_document(board_id, ticket_id)
+            overflow = archive.get("history_overflow", {}) if isinstance(archive, Mapping) else {}
+            overflow = overflow if isinstance(overflow, Mapping) else {}
+            # Full is an explicit single-ticket read. Restore retained histories
+            # instead of reusing the inline annotation window as complete detail.
+            # Dispatch has its own include_dispatch_history projection below.
+            for field in HISTORY_FIELDS.values():
+                if field == "dispatch_history":
+                    continue
+                inline = ticket.get(field, [])
+                older = overflow.get(field, [])
+                inline = inline if isinstance(inline, list) else []
+                older = older if isinstance(older, list) else []
+                projected[field] = copy.deepcopy([*older, *inline])
+                omitted = ticket.get(f"{field}_omitted_count", 0)
+                omitted = omitted if type(omitted) is int and omitted > 0 else 0
+                projected[f"{field}_omitted_count"] = max(0, omitted - len(older))
+            projected["annotation_count"] = len(projected["annotations"]) + projected["annotations_omitted_count"]
+            return projected
         ticket = document["tickets"].get(ticket_id)
         if ticket is None:
             archived = service.merged_archived_ticket(board_id, ticket_id)
             if archived is not None:
                 return {
                     "ok": True,
-                    "ticket": project_ticket(
-                        board_id, archived, document=document, principal=principal
-                    ),
+                    "ticket": read_projection(archived, archived=True),
                     "archived": True,
                     "latest_seq": latest_seq(board_id),
                 }
             raise ValueError("ticket not found")
         return {
             "ok": True,
-            "ticket": project_ticket(
-                board_id, ticket, document=document, principal=principal
-            ),
+            "ticket": read_projection(ticket),
             "latest_seq": latest_seq(board_id),
         }
 
@@ -11684,7 +11902,15 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             require_id("message_id", message_id) if message_id is not None else None
         )
         principal = current_principal()
-        require_board_write_or_coordinate(principal)
+        # Reviewers have read+review, not board-write. The transaction below
+        # authorizes them only when they hold this ticket's exact review lease;
+        # do not widen their scopes to make this reporting path work.
+        if "board:write" in principal.scopes:
+            require_board_write_or_coordinate(principal)
+        elif "board:review" in principal.scopes:
+            require_board_review_or_coordinate(principal)
+        else:
+            require_board_write_or_coordinate(principal)
         if kind not in COORDINATOR_QUESTION_KINDS:
             raise ValueError("kind must be decision, deliverable, approval, or information")
         now = time.time()
@@ -11712,11 +11938,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 and ticket.get("claimed_by_principal_id") == principal.principal_id
             )
             is_admin = membership.get("role") == "admin"
-            review_lease = ticket.get("review_lease") or {}
+            review_lease = ticket.get("review_lease")
             # The independent reviewer asks through the same primitive, with no
             # new write rights: holding the review lease is the only addition.
             is_reviewer = (
-                review_lease.get("reviewer_agent_id") == actor["agent_id"]
+                ticket.get("status") == "submitted"
+                and review_lease_is_live(ticket, now)
+                and isinstance(review_lease, Mapping)
+                and review_lease.get("reviewer_agent_id") == actor["agent_id"]
                 and review_lease.get("reviewer_principal_id") == principal.principal_id
             )
             is_dispatch_information = (
@@ -13328,13 +13557,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         assigned_to: str | None = None,
         include_closed: bool = False,
         include_archived: bool = True,
-        limit: int = 100,
+        limit: int = 10,
         agent_name: str | None = None,
         review_unclaimed_only: bool = False,
         ticket_ids: list[str] | None = None,
-        view: str = DEFAULT_TICKET_READ_VIEW,
+        view: str = "summary",
         include_dispatch_history: bool = False,
         cursor: str | None = None,
+        max_bytes: int | None = None,
     ) -> dict[str, Any]:
         """List authorized tickets with bounded server-side filters.
 
@@ -13342,6 +13572,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         visible through the compact hot-document index; their full bodies are
         read through from the archive for the returned page only.
         ``include_archived=False`` restricts results to the hot document.
+        Defaults to ten summaries. Follow ``next_cursor`` with the same filters
+        and view for more; use ``ticket_get(view="full")`` for one exact ticket
+        and ``ticket_history_list`` to page its retained evidence.
+        Summary pages default to 32 KiB; explicit work/full pages retain the
+        existing 192 KiB bound. ``max_bytes`` adjusts a page without cutting text.
         """
         board_id = require_id("board_id", board_id)
         if view not in TICKET_READ_VIEWS:
@@ -13356,6 +13591,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             raise ValueError("unsupported ticket status")
         if not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500")
+        page_max_bytes = max_bytes if max_bytes is not None else (32_768 if view == "summary" else DEFAULT_PAGE_MAX_BYTES)
+        if type(page_max_bytes) is not int or not 8_192 <= page_max_bytes <= DEFAULT_PAGE_MAX_BYTES:
+            raise ValueError(f"max_bytes must be between 8192 and {DEFAULT_PAGE_MAX_BYTES}")
         selected_ticket_ids: set[str] | None = None
         if ticket_ids is not None:
             if not isinstance(ticket_ids, list) or not 1 <= len(ticket_ids) <= 500:
@@ -13497,7 +13735,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         for item, is_archived in eligible[:limit]:
             # Reserve enough room for the compact oversized-item stub before
             # hydrating an archive body. Every hydrated archive row is returned.
-            if response_bytes_estimate + 4_096 > DEFAULT_PAGE_MAX_BYTES:
+            if response_bytes_estimate + 4_096 > page_max_bytes:
                 break
             if is_archived:
                 archived_id = str(item.get("ticket_id") or "")
@@ -13546,7 +13784,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
             row_bytes = serialized_bytes(read_row)
             # Keep room for the response envelope and opaque continuation cursor.
-            if response_bytes_estimate + row_bytes + 4_096 > DEFAULT_PAGE_MAX_BYTES:
+            if response_bytes_estimate + row_bytes + 4_096 > page_max_bytes:
                 row = {
                     key: copy.deepcopy(row.get(key))
                     for key in (
@@ -13565,7 +13803,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 )
                 row["oversized_for_list"] = True
                 row_bytes = serialized_bytes(row)
-            projected.append(row)
+                read_row = row
+            projected.append(read_row)
             returned_keys.append(item_key((item, is_archived)))
             response_bytes_estimate += row_bytes
 
@@ -13583,6 +13822,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         return {
             "ok": True,
             "tickets": projected,
+            "view": view,
+            "include_dispatch_history": include_dispatch_history,
             "count": len(projected),
             "returned_count": len(projected),
             "total_matching": len(combined),
@@ -13591,7 +13832,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "has_more": remaining_after_page,
             "read_consistency": "live",
             "watermark": watermark,
-            "response_max_bytes": DEFAULT_PAGE_MAX_BYTES,
+            "response_max_bytes": page_max_bytes,
             "response_bytes_estimate": response_bytes_estimate,
             "archive_hydrated_count": archive_hydrated_count,
             "filters": {
@@ -15428,6 +15669,56 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             raise ValueError(
                 "expected_absent and expected_sha256 are mutually exclusive"
             )
+
+        def validation_delivery_modes(encoded: Any) -> dict[str, str] | None:
+            if not isinstance(encoded, str):
+                return None
+            try:
+                registry = json.loads(encoded)
+            except (TypeError, json.JSONDecodeError):
+                return None
+            projects = registry.get("projects") if isinstance(registry, Mapping) else None
+            if not isinstance(projects, Mapping):
+                return None
+            modes: dict[str, str] = {}
+            for name, project in projects.items():
+                if not isinstance(name, str) or not isinstance(project, Mapping):
+                    continue
+                mode = project.get("final_validation_delivery", "require_pass")
+                if type(mode) is not str or mode not in {"require_pass", "draft_with_report"}:
+                    raise ValueError(
+                        "project_registry final_validation_delivery must be require_pass or draft_with_report"
+                    )
+                modes[name] = mode
+            return modes
+
+        def require_admin_for_delivery_mode_change(document: Mapping[str, Any], old: Any, new: str) -> None:
+            if key != "project_registry" or old == new:
+                return
+            state = document.get("state", {})
+            current = state.get(key) if isinstance(state, Mapping) else None
+            old_raw = current.get("value") if isinstance(current, Mapping) else None
+            old_modes = validation_delivery_modes(old_raw)
+            new_modes = validation_delivery_modes(new)
+            if new_modes is None:
+                # A malformed replacement can erase the opt-in as surely as
+                # an explicit strict value; do not let a non-admin bypass the
+                # mode-transition fence by making the registry unreadable.
+                if old_modes is not None and any(
+                    mode != "require_pass" for mode in old_modes.values()
+                ):
+                    service.resolve_board_context(document, principal.principal_id, {"admin"})
+                return
+            if old_modes is None:
+                # A first registry write may onboard strict projects freely;
+                # introducing an opt-in still requires actual board admin.
+                changed = any(mode != "require_pass" for mode in new_modes.values())
+            else:
+                changed = any(old_modes.get(name, "require_pass") != new_modes.get(name, "require_pass")
+                              for name in set(old_modes) | set(new_modes))
+            if changed:
+                service.resolve_board_context(document, principal.principal_id, {"admin"})
+
         now = time.time()
 
         # Coordinator/observer refreshes commonly converge on an already
@@ -15460,6 +15751,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 )
             ):
                 raise ValueError("state precondition failed")
+            if key == "project_registry" and current_value != safe_value:
+                require_admin_for_delivery_mode_change(document, current_value, safe_value)
             if isinstance(current, Mapping) and current_value == safe_value:
                 service.resolve_board_context(
                     document,
@@ -15487,6 +15780,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             state = document.setdefault("state", {})
             previous = state.get(key)
             previous_value = previous.get("value") if isinstance(previous, dict) else None
+            if key == "project_registry" and previous_value != safe_value:
+                require_admin_for_delivery_mode_change(document, previous_value, safe_value)
             if expected_absent:
                 if key in state:
                     raise ValueError("state precondition failed")

@@ -1010,6 +1010,24 @@ def test_registry_round_trips_delivery_policy_hierarchy_without_inference():
     assert 'delivery_policy_group' not in parsed['projects']['web']
 
 
+@pytest.mark.parametrize("mode", ["require_pass", "draft_with_report"])
+def test_registry_preserves_final_validation_delivery_opt_in(mode):
+    parsed = parse_project_registry(state({"schema_version": 1, "projects": {
+        "api": {"board_id": "api", "work_dir": "/repo/api", "status": "active",
+                "final_validation_delivery": mode}}}))
+    expected = {} if mode == "require_pass" else {"final_validation_delivery": mode}
+    assert {key: value for key, value in parsed["projects"]["api"].items()
+            if key == "final_validation_delivery"} == expected
+
+
+@pytest.mark.parametrize("mode", [None, "draft", "disabled", True])
+def test_registry_rejects_invalid_final_validation_delivery(mode):
+    with pytest.raises(ValueError, match="final_validation_delivery"):
+        parse_project_registry(state({"schema_version": 1, "projects": {
+            "api": {"board_id": "api", "work_dir": "/repo/api", "status": "active",
+                    "final_validation_delivery": mode}}}))
+
+
 def test_registry_rejects_unknown_delivery_policy_group():
     with pytest.raises(ValueError, match='is not defined'):
         parse_project_registry(state({'schema_version': 1, 'projects': {

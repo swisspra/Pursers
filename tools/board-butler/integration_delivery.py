@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pursers_client.delivery_workflow import parse_delivery_workflow
 
 SHA = re.compile(r'^[0-9a-f]{40}$')
+SHA256 = re.compile(r'^[0-9a-f]{64}$')
 
 
 def blocked(reason):
@@ -133,11 +134,13 @@ def parse_batch_policy(value: Any) -> dict[str, Any] | None:
         raise ValueError('delivery_workflow.trigger is unsupported')
     if result['snapshot_strategy'] not in BATCH_SNAPSHOTS:
         raise ValueError('delivery_workflow.snapshot_strategy is unsupported')
-    folded = [result['base_branch'].casefold(), result['integration_branch'].casefold(),
-              result['target_branch'].casefold()]
+    base, integration, target = (result['base_branch'], result['integration_branch'],
+                                  result['target_branch'])
+    folded = [base.casefold(), integration.casefold(), target.casefold()]
     if (folded[0] == folded[1] or folded[1] == folded[2]
-            or (mode != 'branch_only' and folded[0] == folded[2])):
-        raise ValueError('base, integration and customer target branches must be distinct')
+            or (folded[0] == folded[2]
+                and not (mode == 'branch_only' or (mode == 'batch_pr' and base == target)))):
+        raise ValueError('base and integration must be distinct; only an exact batch PR base may equal its customer target')
     if mode == 'branch_only' and result['snapshot_strategy'] == 'rolling':
         raise ValueError('branch_only uses immutable delivery snapshots')
     revision = value.get('policy_revision')
@@ -469,9 +472,11 @@ class BatchDeliveryRuntime:
         return {
             'ticket_id': member['ticket_id'], 'source_ref': member['source_ref'],
             'source_sha': source_sha, 'issue_ids': list(member['issue_ids']),
-            'summary': str(member['summary'])[:4000], 'tests': str(member['tests'])[:8000],
-            'blockers': str(member.get('blockers', 'none'))[:4000],
-            'baseline_failures': str(member.get('baseline_failures', 'none'))[:4000],
+            # The durable ledger is the evidence record; never truncate it to fit
+            # a provider's PR-description limit. The PR receives only a manifest.
+            'summary': str(member['summary']), 'tests': str(member['tests']),
+            'blockers': str(member.get('blockers', 'none')),
+            'baseline_failures': str(member.get('baseline_failures', 'none')),
             'evidence': dict(evidence), 'evidence_digest': _digest(evidence), 'status': 'approved',
         }
 
@@ -512,6 +517,18 @@ class BatchDeliveryRuntime:
                 if (existing['source_sha'] != member['source_sha']
                         or existing['evidence_digest'] != member['evidence_digest']):
                     return blocked('ticket_membership_changed_requires_new_approval')
+                pending = [r for r in existing_batch['reservations'].values()
+                           if r.get('status') in {'reserved', 'unknown'}]
+                draft_only = (existing_batch.get('state') == 'blocked_unknown' and pending
+                              and all(r.get('kind') == 'create_draft_customer_pr'
+                                      for r in pending))
+                if draft_only:
+                    # Read-only reconciliation only; never retry a provider create here.
+                    await self.reconcile_unknown(indexed['batch_key'])
+                    existing_batch = self.ledger.document['batches'][indexed['batch_key']]
+                    existing = existing_batch['members'][member['ticket_id']]
+                elif pending:
+                    return blocked('remote_outcome_unknown_reconcile_before_retry')
                 if any(r.get('status') in {'reserved', 'unknown'}
                        for r in existing_batch['reservations'].values()):
                     return blocked('remote_outcome_unknown_reconcile_before_retry')
@@ -649,6 +666,303 @@ class BatchDeliveryRuntime:
         self.ledger.save()
         return True, None
 
+    async def _recover_confirmed_delivery(self, policy, batch, request):
+        """Return only an existing, still-correlated frozen delivery receipt.
+
+        This path is deliberately separate from a new release: it never runs
+        the ready/schedule/manual trigger or initiates a delivery mutation.
+        The workflow adapter has already revalidated immutable QA and member
+        evidence before calling release; this method checks that the ledger
+        and remote state still describe that exact previously released cohort.
+        """
+        batch_key = batch.get('batch_key')
+        head = batch.get('working_head')
+        snapshot_branch = batch.get('snapshot_branch')
+        snapshot_sha = batch.get('snapshot_sha')
+        binding = batch.get('workflow_delivery')
+        members = batch.get('members')
+        if (not isinstance(batch_key, str) or not batch_key
+                or batch.get('effective_policy_revision') != policy['policy_revision']
+                or batch.get('repository') != policy['repository']
+                or batch.get('target_branch') != policy['target_branch']
+                or batch.get('base_branch') != policy['base_branch']
+                or batch.get('integration_branch') != policy['integration_branch']
+                or batch.get('mode') != policy['mode']
+                or batch.get('trigger') != policy['trigger']
+                or batch.get('snapshot_strategy') != 'frozen'
+                or batch.get('snapshot_frozen') is not True
+                or not isinstance(head, str) or not SHA.fullmatch(head)
+                or snapshot_sha != head
+                or not isinstance(snapshot_branch, str)
+                or not snapshot_branch.startswith(policy['snapshot_prefix'].rstrip('/') + '/')
+                or not isinstance(members, Mapping) or not members
+                or set(members) != {row.get('ticket_id') for row in members.values()
+                                    if isinstance(row, Mapping)}
+                or any(not isinstance(row, Mapping) or row.get('status') != 'in_delivery'
+                       or not SHA.fullmatch(str(row.get('source_sha', '')))
+                       or not isinstance(row.get('evidence_digest'), str)
+                       for row in members.values())):
+            return blocked('confirmed_delivery_ledger_binding_mismatch')
+        cohort = request.get('cohort_id') if isinstance(request, Mapping) else None
+        requested_members = request.get('members') if isinstance(request, Mapping) else None
+        if (not isinstance(cohort, str) or not cohort
+                or batch.get('ready_cohort_id') != cohort
+                or not isinstance(requested_members, list)
+                or sorted(requested_members) != sorted(members)
+                or not isinstance(binding, Mapping) or binding.get('cohort_id') != cohort
+                or binding.get('combined_revision') != head):
+            return blocked('confirmed_delivery_cohort_binding_mismatch')
+        validation = batch.get('validation')
+        if (not isinstance(validation, Mapping) or validation.get('passed') is not True
+                or validation.get('source_sha') != head
+                or not SHA.fullmatch(str(validation.get('target_sha', '')))):
+            return blocked('confirmed_delivery_validation_binding_mismatch')
+        try:
+            observed_snapshot = await self.adapter.read_ref(policy['repository'], snapshot_branch)
+        except Exception:
+            return blocked('confirmed_delivery_snapshot_unavailable')
+        if observed_snapshot != head:
+            return blocked('confirmed_delivery_snapshot_mismatch')
+
+        if policy['mode'] == 'branch_only':
+            if batch.get('state') != 'in_delivery' or batch.get('customer_pr') is not None:
+                return blocked('confirmed_branch_receipt_mismatch')
+            return {'state': 'in_delivery', 'batch_key': batch_key,
+                    'branch': snapshot_branch, 'released': True}
+
+        if policy['mode'] != 'batch_pr' or batch.get('state') != 'delivery_open':
+            return blocked('confirmed_pr_receipt_state_mismatch')
+        recorded = batch.get('customer_pr')
+        if (not isinstance(recorded, Mapping)
+                or isinstance(recorded.get('id'), bool)
+                or not isinstance(recorded.get('id'), (str, int))
+                or (isinstance(recorded.get('id'), str) and not recorded['id'].strip())
+                or (isinstance(recorded.get('id'), int) and recorded['id'] < 1)
+                or recorded.get('correlation') != batch_key
+                or recorded.get('source_branch') != snapshot_branch
+                or recorded.get('source_sha') != head
+                or recorded.get('target_branch') != policy['target_branch']):
+            return blocked('confirmed_pr_ledger_binding_mismatch')
+        try:
+            active = await self.adapter.list_customer_prs(
+                policy['repository'], policy['target_branch'], status='active')
+            remote = await self.adapter.get_customer_pr(policy['repository'], recorded['id'])
+        except Exception:
+            return blocked('confirmed_pr_remote_state_unavailable')
+        def exact_pr(pr):
+            return (isinstance(pr, Mapping)
+                    and pr.get('id') == recorded['id']
+                    and pr.get('status') == 'active'
+                    and pr.get('correlation') == batch_key
+                    and pr.get('source_branch') == snapshot_branch
+                    and pr.get('source_sha') == head
+                    and pr.get('target_branch') == policy['target_branch'])
+        if (not isinstance(active, list) or len(active) != 1
+                or not exact_pr(active[0]) or not exact_pr(remote)):
+            return blocked('confirmed_pr_remote_binding_mismatch')
+        return {'state': 'delivery_open', 'batch_key': batch_key,
+                'pr_id': recorded['id'], 'released': True}
+
+    async def release_report_held_draft(self, raw_policy, batch_key, *, request=None,
+                                        report=None):
+        """Publish one correlated draft without changing QA or acceptance state."""
+        policy = parse_batch_policy(raw_policy)
+        if policy is None or policy['mode'] != 'batch_pr' or policy['snapshot_strategy'] != 'frozen':
+            return blocked('report_held_draft_requires_frozen_batch_pr')
+        batch = self.ledger.document['batches'].get(batch_key)
+        if not batch or batch.get('effective_policy_revision') != policy['policy_revision']:
+            return blocked('batch_not_found_or_policy_changed')
+        if batch.get('state') == 'blocked_unknown':
+            await self.reconcile_unknown(batch_key)
+            batch = self.ledger.document['batches'].get(batch_key)
+            if batch.get('state') == 'blocked_unknown':
+                return blocked('draft_pr_create_outcome_unknown')
+        if batch.get('state') == 'draft_open':
+            if (batch.get('publication_state') != 'report_held_draft'
+                    or batch.get('draft_report_source_digest') != _digest(dict(report or {}))):
+                return blocked('draft_publication_ledger_mismatch')
+            pr = batch.get('customer_pr')
+            if not isinstance(pr, Mapping) or pr.get('is_draft') is not True:
+                return blocked('draft_pr_ledger_binding_mismatch')
+            try:
+                active = await self.adapter.list_customer_prs(
+                    policy['repository'], policy['target_branch'], status='active')
+                remote = await self.adapter.get_customer_pr(policy['repository'], pr['id'])
+            except Exception:
+                return blocked('draft_pr_remote_state_unavailable')
+            if (not isinstance(active, list) or len(active) != 1
+                    or not self._matches_draft_pr(active[0], batch)
+                    or not self._matches_draft_pr(remote, batch)
+                    or active[0].get('id') != pr.get('id')
+                    or remote.get('id') != pr.get('id')):
+                return blocked('draft_pr_remote_binding_mismatch')
+            return {'state': 'report_held_draft', 'batch_key': batch_key,
+                    'pr_id': pr['id'], 'released': True, 'is_draft': True}
+        if batch.get('state') != 'collecting':
+            return blocked('batch_not_collecting_for_draft')
+        if (not isinstance(report, Mapping)
+                or report.get('quality_status') not in {'approved', 'rejected'}
+                or report.get('combined_revision') != batch.get('working_head')
+                or not isinstance(report.get('submission'), Mapping)
+                or not isinstance(report.get('review'), Mapping)):
+            return blocked('exact_completed_qa_report_required')
+        due, reason = self._trigger_due(policy, batch, request)
+        if not due:
+            return {'state': batch['state'], 'batch_key': batch_key,
+                    'released': False, 'reason': reason}
+        try:
+            validation = await self.adapter.validate_cumulative(
+                policy['repository'], policy['base_branch'], batch['working_head'],
+                list(batch['members'].values()))
+        except Exception as exc:
+            batch['state'] = 'blocked_validation'
+            batch['validation_error_class'] = type(exc).__name__
+            self.ledger.save()
+            return blocked('exact_validation_capability_unavailable')
+        if (not isinstance(validation, Mapping)
+                or validation.get('source_sha') != batch['working_head']
+                or not SHA.fullmatch(str(validation.get('target_sha', '')))
+                or type(validation.get('passed')) is not bool):
+            batch['state'] = 'blocked_validation'; self.ledger.save()
+            return blocked('exact_cumulative_validation_disposition_required')
+        request = dict(request or {})
+        request['cohort_id'] = request.get('cohort_id') or batch.get('ready_cohort_id')
+        request['members'] = request.get('members') or list(batch.get('members', {}))
+        if not request['cohort_id']:
+            return blocked('exact_ready_cohort_required')
+        # Check the final exact body before snapshot or PR reservations/mutations.
+        render_batch = {**batch, 'snapshot_sha': batch.get('snapshot_sha') or batch['working_head']}
+        try:
+            body = self._pr_body(render_batch, draft_report=report)
+        except (TypeError, ValueError, UnicodeError):
+            return blocked('customer_pr_body_preflight_failed')
+        batch['validation'] = dict(validation)
+        batch['validation_disposition'] = 'passed' if validation['passed'] else 'failed_or_baseline'
+        self.ledger.save()
+        snapshot = await self._snapshot(policy, batch)
+        if snapshot.get('state') == 'integration_blocked':
+            return snapshot
+        return await self._open_or_reuse_report_held_draft(policy, batch, report, body=body)
+
+    @staticmethod
+    def _matches_draft_pr(pr, batch):
+        return (isinstance(pr, Mapping) and pr.get('status') == 'active'
+                and pr.get('is_draft') is True
+                and pr.get('correlation') == batch.get('batch_key')
+                and pr.get('source_branch') == batch.get('snapshot_branch')
+                and pr.get('source_sha') == batch.get('snapshot_sha')
+                and pr.get('target_branch') == batch.get('target_branch'))
+
+    async def _open_or_reuse_report_held_draft(self, policy, batch, report, *, body):
+        """Create/reconcile an exactly-once draft without using ready publication."""
+        target = await self.adapter.read_ref(policy['repository'], policy['target_branch'])
+        validation = batch.get('validation')
+        if (not isinstance(validation, Mapping) or type(validation.get('passed')) is not bool
+                or validation.get('source_sha') != batch.get('working_head')
+                or validation.get('target_sha') != target):
+            batch['state'] = 'blocked_validation'
+            self.ledger.save()
+            return blocked('draft_validation_binding_mismatch')
+        active = await self.adapter.list_customer_prs(
+            policy['repository'], policy['target_branch'], status='active')
+        if not isinstance(active, list):
+            return blocked('customer_pr_inventory_unavailable')
+        digest = _digest(dict(report))
+        exact = [row for row in active if self._matches_draft_pr(row, batch)]
+        if len(exact) > 1 or len(active) != len(exact):
+            batch['state'] = 'blocked_existing_pr'
+            self.ledger.save()
+            return blocked('one_active_customer_pr_limit')
+        reservation = None
+        if exact:
+            pr = exact[0]
+            reservation = next((row for row in batch.get('reservations', {}).values()
+                                if row.get('kind') == 'create_draft_customer_pr'
+                                and row.get('status') == 'confirmed'
+                                and isinstance(row.get('result'), Mapping)
+                                and isinstance(row['result'].get('pr'), Mapping)
+                                and row['result']['pr'].get('id') == pr.get('id')), None)
+            if reservation is None:
+                batch['state'] = 'blocked_existing_pr'
+                self.ledger.save()
+                return blocked('draft_pr_has_no_confirmed_publication_intent')
+        else:
+            payload = {'source_branch': batch['snapshot_branch'], 'target_branch': policy['target_branch'],
+                       'snapshot_sha': batch['snapshot_sha'], 'correlation': batch['batch_key'],
+                       'mutable': False, 'is_draft': True, 'report_digest': digest,
+                       'publication_state': 'report_held_draft'}
+            batch['draft_report'] = dict(report)
+            batch['draft_report_source_digest'] = digest
+            self.ledger.save()
+            operation_id = _digest([batch['batch_key'], 'create_draft_customer_pr', payload])
+            prior_intent = batch.get('reservations', {}).get(operation_id)
+            is_new_intent = prior_intent is None
+            reservation = self._reserve(batch, 'create_draft_customer_pr', payload)
+            status = reservation.get('status')
+            if status == 'confirmed':
+                result = reservation.get('result')
+                pr = result.get('pr') if isinstance(result, Mapping) else None
+            elif status in {'reserved', 'unknown'} and not is_new_intent:
+                # A persisted intent might have crossed the provider boundary
+                # before a crash. Reconcile only; never repeat its create.
+                try:
+                    result = await self.adapter.reconcile_operation(policy['repository'], reservation)
+                except Exception:
+                    result = {'status': 'unknown'}
+                if result.get('status') != 'confirmed':
+                    reservation['status'] = 'unknown'
+                    self.ledger.save()
+                    batch['state'] = 'blocked_unknown'
+                    self.ledger.save()
+                    return blocked('draft_pr_create_outcome_unknown')
+                self._finish(reservation, result)
+                pr = result.get('pr')
+            elif status in {'reserved', 'new'} and is_new_intent:
+                try:
+                    result = await self.adapter.create_customer_pr(
+                        policy['repository'], payload, body, reservation['operation_id'])
+                except Exception:
+                    reservation['status'] = 'unknown'
+                    self.ledger.save()
+                    batch['state'] = 'blocked_unknown'
+                    self.ledger.save()
+                    return blocked('draft_pr_create_outcome_unknown')
+                self._finish(reservation, result)
+                if result.get('status') != 'confirmed':
+                    batch['state'] = 'blocked_unknown'
+                    self.ledger.save()
+                    return blocked('draft_pr_create_outcome_unknown')
+                pr = result.get('pr')
+            else:
+                return blocked('draft_pr_reservation_not_creatable')
+        if reservation.get('status') != 'confirmed':
+            self._finish(reservation, {'status': 'confirmed', 'pr': pr})
+        if (not isinstance(pr, Mapping) or pr.get('status') != 'active'
+                or pr.get('id') != (reservation.get('result', {}).get('pr', {}).get('id')
+                                     if isinstance(reservation, Mapping)
+                                     and isinstance(reservation.get('result'), Mapping)
+                                     and isinstance(reservation['result'].get('pr'), Mapping) else pr.get('id'))
+                or pr.get('is_draft') is not True
+                or pr.get('source_branch') != batch['snapshot_branch']
+                or pr.get('source_sha') != batch['snapshot_sha']
+                or pr.get('target_branch') != batch['target_branch']
+                or pr.get('correlation') != batch['batch_key']):
+            batch['state'] = 'blocked_existing_pr'
+            self.ledger.save()
+            return blocked('draft_pr_correlation_mismatch')
+        batch['customer_pr'] = dict(pr)
+        batch['state'] = 'draft_open'
+        batch['publication_state'] = 'report_held_draft'
+        batch['draft_report_source_digest'] = digest
+        batch['draft_report'] = dict(report)
+        batch['released_at'] = self.clock().astimezone(timezone.utc).isoformat()
+        batch['delivery_ready'] = False
+        batch['qa_status'] = 'report_held'
+        batch['security_status'] = 'pending'
+        self.ledger.save()
+        return {'state': 'report_held_draft', 'batch_key': batch['batch_key'],
+                'pr_id': pr['id'], 'released': True, 'is_draft': True}
+
     async def release(self, raw_policy, batch_key, *, request=None):
         policy = parse_batch_policy(raw_policy)
         if policy is None or policy['mode'] == 'per_ticket_pr':
@@ -658,7 +972,16 @@ class BatchDeliveryRuntime:
             return blocked('batch_not_found')
         if batch['effective_policy_revision'] != policy['policy_revision']:
             return blocked('active_batch_policy_is_frozen')
-        if batch['state'] not in {'collecting', 'delivery_open', 'waiting_customer_slot'}:
+        if batch.get('state') == 'draft_open':
+            return blocked('report_held_draft_is_not_ready_for_promotion')
+        if (batch['state'] in {'delivery_open', 'in_delivery'}
+                and batch.get('snapshot_strategy') == 'frozen'
+                and isinstance(batch.get('workflow_delivery'), Mapping)):
+            return await self._recover_confirmed_delivery(policy, batch, request)
+        releasable = batch['state'] in {'collecting', 'waiting_customer_slot'}
+        rolling_update = (batch['state'] == 'delivery_open'
+                          and policy['snapshot_strategy'] == 'rolling')
+        if not (releasable or rolling_update):
             return {'state': batch['state'], 'batch_key': batch_key, 'released': False}
         due, reason = self._trigger_due(policy, batch, request)
         if not due:
@@ -678,8 +1001,16 @@ class BatchDeliveryRuntime:
             batch['state'] = 'blocked_validation'; self.ledger.save()
             return blocked('exact_cumulative_validation_required')
         batch['validation'] = dict(validation)
+        # Validate the exact concise description before snapshot or PR mutations.
+        # The full evidence stays in the private ledger and canonical QA packet.
+        body = None
+        if policy['mode'] == 'batch_pr':
+            try:
+                body = self._pr_body({**batch, 'snapshot_sha': batch['working_head']})
+            except (TypeError, ValueError, UnicodeError):
+                return blocked('customer_pr_body_preflight_failed')
         if batch['state'] == 'delivery_open' and policy['snapshot_strategy'] == 'rolling':
-            return await self._roll_snapshot(policy, batch)
+            return await self._roll_snapshot(policy, batch, body=body)
         snapshot = await self._snapshot(policy, batch)
         if snapshot.get('state') == 'integration_blocked':
             return snapshot
@@ -690,7 +1021,7 @@ class BatchDeliveryRuntime:
             self.ledger.save()
             return {'state': 'in_delivery', 'batch_key': batch_key, 'branch': batch['snapshot_branch'],
                     'released': True}
-        return await self._open_or_reuse_pr(policy, batch)
+        return await self._open_or_reuse_pr(policy, batch, body=body)
 
     async def _snapshot(self, policy, batch):
         observed = await self.adapter.read_ref(policy['repository'], batch['snapshot_branch'])
@@ -718,7 +1049,7 @@ class BatchDeliveryRuntime:
         self.ledger.save()
         return {'state': 'snapshot_ready'}
 
-    async def _open_or_reuse_pr(self, policy, batch):
+    async def _open_or_reuse_pr(self, policy, batch, *, body=None):
         current_target = await self.adapter.read_ref(policy['repository'], policy['target_branch'])
         if current_target != batch.get('validation', {}).get('target_sha'):
             batch['state'] = 'blocked_validation'; self.ledger.save()
@@ -729,7 +1060,8 @@ class BatchDeliveryRuntime:
         exact = [p for p in active if p.get('correlation') == batch['batch_key']
                  and p.get('source_branch') == batch['snapshot_branch']
                  and p.get('source_sha') == batch['snapshot_sha']
-                 and p.get('target_branch') == policy['target_branch']]
+                 and p.get('target_branch') == policy['target_branch']
+                 and p.get('is_draft') is not True]
         if len(active) > 1 or (active and not exact):
             known = all(any(other.get('batch_key') == row.get('correlation')
                             and other.get('state') == 'delivery_open'
@@ -743,11 +1075,18 @@ class BatchDeliveryRuntime:
         if exact:
             pr = exact[0]
         else:
+            # Render and validate before persisting a reservation. Local size or
+            # rendering failures must never create an ambiguous remote intent.
+            if body is None:
+                try:
+                    body = self._pr_body(batch)
+                except (TypeError, ValueError, UnicodeError):
+                    return blocked('customer_pr_body_preflight_failed')
             payload = {'source_branch': batch['snapshot_branch'], 'target_branch': policy['target_branch'],
                        'snapshot_sha': batch['snapshot_sha'], 'correlation': batch['batch_key'],
-                       'mutable': policy['snapshot_strategy'] == 'rolling'}
+                       'mutable': policy['snapshot_strategy'] == 'rolling', 'is_draft': False,
+                       'body_sha256': hashlib.sha256(body.encode('utf-8')).hexdigest()}
             reservation = self._reserve(batch, 'create_customer_pr', payload)
-            body = self._pr_body(batch)
             try:
                 result = await self.adapter.create_customer_pr(policy['repository'], payload, body,
                                                                reservation['operation_id'])
@@ -774,7 +1113,7 @@ class BatchDeliveryRuntime:
         self.ledger.save()
         return {'state': 'in_delivery', 'batch_key': batch['batch_key'], 'pr_id': pr['id'], 'released': True}
 
-    async def _roll_snapshot(self, policy, batch):
+    async def _roll_snapshot(self, policy, batch, *, body=None):
         pr = batch.get('customer_pr', {})
         if pr.get('mutable') is not True:
             batch['state'] = 'blocked_external_edit'; self.ledger.save()
@@ -785,11 +1124,17 @@ class BatchDeliveryRuntime:
         if snapshot.get('state') == 'integration_blocked':
             return snapshot
         payload = {'pr_id': pr['id'], 'source_sha': batch['snapshot_sha'],
-                   'correlation': batch['batch_key']}
+                   'correlation': batch['batch_key'],
+                   'body_sha256': hashlib.sha256(body.encode('utf-8')).hexdigest()}
+        if body is None:
+            try:
+                body = self._pr_body(batch)
+            except (TypeError, ValueError, UnicodeError):
+                return blocked('customer_pr_body_preflight_failed')
         reservation = self._reserve(batch, 'update_customer_pr', payload)
         try:
             result = await self.adapter.update_customer_pr(
-                policy['repository'], payload, self._pr_body(batch), reservation['operation_id'])
+                policy['repository'], payload, body, reservation['operation_id'])
         except Exception:
             reservation['status'] = 'unknown'
             batch['state'] = 'blocked_unknown'
@@ -806,20 +1151,76 @@ class BatchDeliveryRuntime:
         return {'state': 'in_delivery', 'batch_key': batch['batch_key'], 'released': True}
 
     @staticmethod
-    def _pr_body(batch):
-        members = sorted(batch['members'].values(), key=lambda m: m['ticket_id'])
+    def _pr_body(batch, *, max_code_units=3700, draft_report=None):
+        """Render a deterministic bounded PR summary; evidence remains canonical."""
+        if (not isinstance(max_code_units, int) or isinstance(max_code_units, bool)
+                or max_code_units < 1 or max_code_units > 3700
+                or not isinstance(batch, Mapping) or not isinstance(batch.get('members'), Mapping)
+                or not isinstance(batch.get('batch_key'), str)
+                or not re.fullmatch(r'[0-9a-f]{64}', batch['batch_key'])
+                or not isinstance(batch.get('snapshot_sha'), str)
+                or not SHA.fullmatch(batch['snapshot_sha'])):
+            raise ValueError('PR summary identity is incomplete')
+        members = sorted(batch['members'].values(), key=lambda m: m.get('ticket_id', '')
+                         if isinstance(m, Mapping) else '')
+        if any(not isinstance(member, Mapping)
+               or not isinstance(member.get('ticket_id'), str) or not member['ticket_id']
+               or not isinstance(member.get('source_sha'), str)
+               or not SHA.fullmatch(member['source_sha']) for member in members):
+            raise ValueError('PR summary member manifest is incomplete')
+        try:
+            for member in members:
+                member['ticket_id'].encode('utf-16-le')
+        except UnicodeEncodeError as exc:
+            raise ValueError('PR summary member identity is invalid Unicode') from exc
+        manifest = {member['ticket_id']: member['source_sha'] for member in members}
+        if len(manifest) != len(members):
+            raise ValueError('PR summary member manifest has duplicate ticket IDs')
+        workflow = batch.get('workflow_delivery')
+        qa_reference = 'unavailable'
+        qa_report_reference = 'unavailable'
+        if isinstance(workflow, Mapping):
+            ticket_id = workflow.get('final_validation_ticket_id')
+            policy_sha = workflow.get('workflow_policy_sha256')
+            report_sha = workflow.get('final_validation_policy_sha256')
+            if (isinstance(ticket_id, str) and ticket_id
+                    and SHA256.fullmatch(str(policy_sha or ''))
+                    and SHA256.fullmatch(str(report_sha or ''))):
+                qa_reference = ticket_id
+                qa_report_reference = f'workflow-delivery:{policy_sha}; final-report-policy:{report_sha}'
         lines = [f"Pursers-Batch-Correlation: {batch['batch_key']}",
-                 f"Pursers-Snapshot-Mutable: {str(batch['snapshot_strategy'] == 'rolling').lower()}",
-                 '', 'Reviewed members:']
-        for member in members:
-            issues = ', '.join(member['issue_ids']) or 'none'
-            lines.extend([f"- {member['ticket_id']} ({member['source_sha']}), issues: {issues}",
-                          f"  Summary: {member['summary']}", f"  Tests: {member['tests']}",
-                          f"  Blockers: {member['blockers']}",
-                          f"  Baseline failures: {member['baseline_failures']}"])
-        lines.extend(['', 'Validation:', '- Exact cumulative validation is recorded in the private batch ledger.',
-                      '- Customer merge is manual. This body does not claim Sonar issues are resolved.'])
-        return '\n'.join(lines)
+                 f"Pursers-Snapshot-Mutable: {str(batch.get('snapshot_strategy') == 'rolling').lower()}",
+                 f"Immutable snapshot: {batch['snapshot_sha']}",
+                 f"Reviewed members: {len(members)}",
+                 f"Member manifest SHA-256: {_digest(manifest)}"]
+        common = [f'Full QA ticket/report reference: {qa_reference} / {qa_report_reference}',
+                  'QA/security acceptance: pending; this summary is not a security approval.',
+                  'Customer merge is manual. No claim is made that Sonar issues are resolved.',
+                  'Full tests, blockers, baseline findings, report fields, and approval evidence remain in the private batch ledger and canonical QA packet.']
+        member_ids = ', '.join(member['ticket_id'] for member in members)
+        all_members = f'All member tickets: {member_ids or "none"}'
+        if draft_report is None:
+            body = '\n'.join([*lines, all_members, *common])
+        else:
+            if not isinstance(draft_report, Mapping):
+                raise ValueError('draft report is malformed')
+            lines.extend(['', 'Pursers-Publication-State: report-held-draft',
+                          'Status: DRAFT ONLY. QA/security review remains pending; no promotion or merge.',
+                          'Quality status: ' + str(draft_report.get('quality_status', 'unknown')).upper(),
+                          'Combined revision: ' + str(draft_report.get('combined_revision', 'unknown')),
+                          f'Full QA report reference: {qa_reference} (report SHA-256: {_digest(dict(draft_report))})',
+                          'VA status: UNKNOWN. RA status: NOT APPROVED. Security hold remains in force.',
+                          'Manual boundary: no ready promotion, autocomplete, merge, or deployment is authorized.'])
+            body = '\n'.join([*lines, all_members, *common])
+        units = len(body.encode('utf-16-le')) // 2
+        if units > max_code_units:
+            # Never slice prose or an arbitrary prefix of the manifest.
+            manifest_pointer = 'All member tickets: see complete canonical manifest in the private delivery ledger.'
+            body = '\n'.join([*lines, manifest_pointer, *common])
+            units = len(body.encode('utf-16-le')) // 2
+        if units > max_code_units:
+            raise ValueError('PR summary exceeds the supported description limit')
+        return body
 
     async def reconcile_unknown(self, batch_key):
         batch = self.ledger.document['batches'].get(batch_key)
@@ -846,17 +1247,28 @@ class BatchDeliveryRuntime:
                 if result.get('head_sha') != payload.get('sha'):
                     return blocked('reconciled_snapshot_head_mismatch')
                 batch['snapshot_sha'] = result['head_sha']
-            elif reservation['kind'] == 'create_customer_pr':
+            elif reservation['kind'] in {'create_customer_pr', 'create_draft_customer_pr'}:
                 pr = result.get('pr')
+                draft = reservation['kind'] == 'create_draft_customer_pr'
                 if (not isinstance(pr, Mapping) or pr.get('correlation') != batch['batch_key']
                         or pr.get('source_sha') != batch.get('snapshot_sha')
                         or pr.get('source_branch') != batch['snapshot_branch']
-                        or pr.get('target_branch') != batch['target_branch']):
+                        or pr.get('target_branch') != batch['target_branch']
+                        or pr.get('is_draft') is not draft):
                     return blocked('reconciled_customer_pr_mismatch')
-                batch['customer_pr'] = dict(pr); batch['state'] = 'delivery_open'
-                for member in batch['members'].values():
-                    if member['status'] == 'integrated':
-                        member['status'] = 'in_delivery'
+                batch['customer_pr'] = dict(pr)
+                if draft:
+                    batch['state'] = 'draft_open'
+                    batch['publication_state'] = 'report_held_draft'
+                    batch['draft_report_source_digest'] = reservation.get('payload', {}).get('report_digest')
+                    batch['delivery_ready'] = False
+                    batch['qa_status'] = 'report_held'
+                    batch['security_status'] = 'pending'
+                else:
+                    batch['state'] = 'delivery_open'
+                    for member in batch['members'].values():
+                        if member['status'] == 'integrated':
+                            member['status'] = 'in_delivery'
             elif reservation['kind'] == 'update_customer_pr':
                 pr = result.get('pr')
                 recorded = batch.get('customer_pr', {})
@@ -875,7 +1287,10 @@ class BatchDeliveryRuntime:
                     if member['status'] == 'integrated':
                         member['status'] = 'in_delivery'
         if unknown and batch['state'] == 'blocked_unknown':
-            batch['state'] = 'collecting'; self.ledger.save()
+            batch['state'] = 'collecting'
+        # Persist derived state (not just the confirmed reservation) before return;
+        # a restart must observe draft_open/delivery_open after exact reconciliation.
+        self.ledger.save()
         return {'state': batch['state'], 'batch_key': batch_key, 'reconciled': len(unknown)}
 
     async def observe_customer_completion(self, batch_key):

@@ -114,6 +114,7 @@ def seat(
     template_digest: str = DIGEST,
     managed: bool = True,
     reason_code: str | None = None,
+    process_absent_verified: bool = False,
 ) -> Any:
     return butler.FleetSeat(
         seat_id=seat_id,
@@ -131,6 +132,7 @@ def seat(
         managed=managed,
         last_failure_at=last_failure_at,
         reason_code=reason_code,
+        process_absent_verified=process_absent_verified,
     )
 
 
@@ -2304,6 +2306,42 @@ def test_unhealthy_seat_does_not_replace_a_serving_worker() -> None:
     plan = reconciler({'pursers': policy}).plan(current, {})
     assert plan.provider_desired['pursers'] == {'fast': 0, 'working': 1}
     assert plan.operations == ()
+
+
+def test_verified_dead_leased_seat_is_not_productive_but_still_reserves_caps() -> None:
+    policy = board_policy(provider_maximums={'fast': 1, 'working': 1})
+    dead = seat('dead-reviewer', 'reviewer', provider='fast', lifecycle='unhealthy',
+        live=True, busy=True, process_absent_verified=True)
+    healthy = seat('healthy-reviewer', 'reviewer', provider='working', lifecycle='busy',
+        live=True, busy=True)
+    assert dead.active and not dead.serving
+    assert healthy.active and healthy.serving
+    dead_only = reconciler({'pursers': policy}).plan(
+        snapshot({'pursers': demand(review=1, health={'fast': 'healthy'})}, [dead]), {})
+    dead_explanation = next(row for row in dead_only.explanations
+        if row.get('role') == 'reviewer')
+    assert dead_explanation['live_leases'] == 0
+    assert dead_explanation['healthy_approved_seats'] == 0
+    assert dead_only.desired['pursers']['reviewer'] == 0
+    current = snapshot({'pursers': demand(review=1,
+        health={'fast': 'healthy', 'working': 'healthy'})}, [dead, healthy])
+    plan = reconciler({'pursers': policy}).plan(current, {})
+    assert plan.desired['pursers']['reviewer'] == 1
+    reviewer_capacity = next(row for row in plan.explanations
+        if row.get('role') == 'reviewer')
+    assert reviewer_capacity['live_leases'] == 1
+    assert plan.provider_desired['pursers']['working'] == 1
+    assert plan.operations == ()
+    # A known absent process remains a hard-cap reservation until canonical
+    # lease release and CAS reconciliation; it is not equivalent to unknown.
+    limited = reconciler({'pursers': policy}, host_cap=1).plan(current, {})
+    assert limited.operations == ()
+
+
+def test_unknown_unhealthy_seat_is_not_claimed_as_verified_absent() -> None:
+    unknown = seat('unknown-reviewer', 'reviewer', lifecycle='unhealthy', live=True)
+    assert unknown.active and not unknown.serving
+    assert not unknown.process_known_absent
 
 
 def test_unhealthy_seat_does_not_block_an_authorized_stopped_fallback() -> None:

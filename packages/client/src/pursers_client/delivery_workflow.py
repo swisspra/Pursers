@@ -247,9 +247,14 @@ def _validate_effective_policy(policy: Mapping[str, Any]) -> None:
     branches = [policy['mapped_base']]
     if policy['mode'] in {'branch_only', 'batch_pr'}:
         branches.append(policy['integration_branch'])
-    if (policy['final_pr_target'] is not None
-            and policy['final_pr_target'].casefold() not in {branch.casefold() for branch in branches}):
-        branches.append(policy['final_pr_target'])
+    if policy['final_pr_target'] is not None:
+        for branch in branches:
+            if (policy['final_pr_target'].casefold() == branch.casefold()
+                    and policy['final_pr_target'] != branch
+                    and policy['mode'] == 'batch_pr'):
+                raise ValueError('batch_pr branch aliases differing only by case are ambiguous')
+        if policy['final_pr_target'].casefold() not in {branch.casefold() for branch in branches}:
+            branches.append(policy['final_pr_target'])
     folded = [branch.casefold() for branch in branches]
     if len(folded) != len(set(folded)):
         raise ValueError('delivery policy branches must be distinct, including case differences')
@@ -259,9 +264,8 @@ def _validate_effective_policy(policy: Mapping[str, Any]) -> None:
     if policy['mode'] == 'branch_only' and policy['final_pr_target'] is not None:
         raise ValueError('branch_only delivery requires final_pr_target null')
     if (policy['mode'] == 'batch_pr'
-            and policy['final_pr_target'].casefold()
-            in {policy['mapped_base'].casefold(), policy['integration_branch'].casefold()}):
-        raise ValueError('batch_pr final_pr_target must be distinct from mapped and integration branches')
+            and policy['final_pr_target'].casefold() == policy['integration_branch'].casefold()):
+        raise ValueError('batch_pr final_pr_target must be distinct from the owned integration branch')
     if policy['mode'] in {'per_ticket_pr', 'batch_pr'} and policy['final_pr_target'] is None:
         raise ValueError(f'{policy["mode"]} delivery requires final_pr_target')
     if policy['mode'] == 'per_ticket_pr' and policy['auto_integrate']:

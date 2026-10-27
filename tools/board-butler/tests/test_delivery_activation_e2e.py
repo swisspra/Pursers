@@ -126,9 +126,16 @@ def test_resident_connector_reads_full_ado_detail_before_matching_correlation():
     assert rows[0]["correlation"] == marker
     reconciled = asyncio.run(connector.reconcile_operation("ignored", {
         "kind": "create_customer_pr",
-        "payload": {"target_branch": "customer-review", "correlation": marker},
+        "payload": {"target_branch": "customer-review", "source_branch": "pursers/delivery/one",
+                    "snapshot_sha": "a" * 40, "correlation": marker},
     }))
     assert reconciled["status"] == "confirmed"
+    draft_reconciled = asyncio.run(connector.reconcile_operation("ignored", {
+        "kind": "create_draft_customer_pr",
+        "payload": {"target_branch": "customer-review", "source_branch": "pursers/delivery/one",
+                    "snapshot_sha": "a" * 40, "correlation": marker},
+    }))
+    assert draft_reconciled["status"] == "unknown"  # Existing PR is ready, never adopt as draft.
 
 
 def reviewed_member(ticket_id: str, branch: str, sha: str) -> dict[str, object]:

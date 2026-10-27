@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pursers VM Butler"
+  short_description: "Operate the VM intake, fleet and delivery loop"
+  default_prompt: "Use $pursers-vm-butler to inspect the resident VM Butler, explain its current intake and fleet decisions, and identify the next authorized action."

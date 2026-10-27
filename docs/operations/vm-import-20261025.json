@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "captured_on": "2026-10-25",
+  "product_version": "5.2.1",
+  "upstream_repository": "https://github.com/swisspra/Pursers.git",
+  "upstream_tag": "v5.2.1",
+  "upstream_release_commit": "3575b04bc7054fc5481024c181fe9efa2d8b898b",
+  "upstream_main_commit": "099ea2cc4e6392266eb3a34089d5216dff55faa9",
+  "snapshot_branch": "codex/vm-snapshot-20261025",
+  "snapshot_commit": "859632cf1399b26f0703aac4e8d5ea839c3131f0",
+  "captured_source_files": 915,
+  "capture_archive_sha256": "6e16bffa761662a54feeefb5edf15b0faa8f9784596c30c9114505e2f2ce81cd",
+  "baseline_files_missing": 0,
+  "modified_files": 16,
+  "added_files": 5,
+  "deployment_performed": false,
+  "validation_scope": "Source capture verified byte-for-byte; known runtime defects preserved. See SONAR-ADO-VM.md.",
+  "changed_files": [
+    {
+      "status": "M",
+      "path": "docs/design/schemas/autonomous-butler-config-v1.schema.json",
+      "sha256": "54737546083d6be52963443f12ce240654defc935a0ef358b3077cfc4162cea6"
+    },
+    {
+      "status": "M",
+      "path": "docs/operations/shared-registry-fleet.md",
+      "sha256": "ce48e7c85ee95069e809ab240a7f5b0c428af21b19a3dab6ec726384411b682c"
+    },
+    {
+      "status": "M",
+      "path": "packages/central/src/pursers_central/butler_commands.py",
+      "sha256": "73599d1453753252bd243b74b2559e5c67581e0ce29f30a7ebd845249733fe63"
+    },
+    {
+      "status": "A",
+      "path": "packages/central/tests/test_unlimited_butler_budget.py",
+      "sha256": "36cf27ec9957fd94775cc9b8e3145676e89bf63439dd0c612cfa80020adf8afe"
+    },
+    {
+      "status": "M",
+      "path": "packages/client/src/pursers_client/mcp_proxy.py",
+      "sha256": "9e2f399d48a8d2a2e43101f463215b3b22bd5d993304064c697a2fc33cc0b78b"
+    },
+    {
+      "status": "A",
+      "path": "packages/client/src/pursers_client/model_output.py",
+      "sha256": "e6016a31be017b174798ca1ca6eb7aa2cea5bbd8da33fe50a72f456bea95b697"
+    },
+    {
+      "status": "M",
+      "path": "packages/client/tests/test_mcp_proxy.py",
+      "sha256": "c36a5314316e582442975d2cc99568869ddda92a368b1eb4ef085776176dd7da"
+    },
+    {
+      "status": "A",
+      "path": "packages/client/tests/test_model_output.py",
+      "sha256": "bafba151ca7bb3c70103826ff17c397c97999294e2f7221dc2fce8cb1cb492fd"
+    },
+    {
+      "status": "M",
+      "path": "tools/board-butler/board_butler.py",
+      "sha256": "3d10c00394040e6bc5d002d238d84819a4e07dcc913fdfb58468f193539d5ad9"
+    },
+    {
+      "status": "M",
+      "path": "tools/board-butler/fleet_observation.py",
+      "sha256": "18d9a4f0702084e3f1030396808c5dcf64461497cde9cb8033ae45a766004139"
+    },
+    {
+      "status": "A",
+      "path": "tools/board-butler/registry_provisioning.py",
+      "sha256": "304b7d05220c9fb1f853233a6d78ed611abd20c917de47040420065b84ba04f6"
+    },
+    {
+      "status": "M",
+      "path": "tools/board-butler/tests/test_board_butler.py",
+      "sha256": "2f9ca865c8278c7ed7908c998f18debc1b315f6dee53bed61a567ff32e6fa52f"
+    },
+    {
+      "status": "A",
+      "path": "tools/board-butler/tests/test_registry_provisioning.py",
+      "sha256": "c7550628d3958a514a593ea5198084c4e5aaea8dd9844a8b024151631fa298be"
+    },
+    {
+      "status": "M",
+      "path": "tools/fleet-dashboard/butler_settings.py",
+      "sha256": "81d59818bb2de6a82308046d36ba4921f5bbdcc0b13040da9abb22a67f9f247b"
+    },
+    {
+      "status": "M",
+      "path": "tools/fleet-dashboard/ui/assets/app.js",
+      "sha256": "1ca4c020690b5bc0d19aab1df4480801577ef491c58aeb7b83507232adff4159"
+    },
+    {
+      "status": "M",
+      "path": "tools/fleet-dashboard/ui/views/settings.js",
+      "sha256": "34b474cafab6c4848fbdf2f2f2c0c39a68ca95ac1701f6d3f10911a9d3b0b0eb"
+    },
+    {
+      "status": "M",
+      "path": "tools/seat-kit/event_seat.py",
+      "sha256": "50fe4649c62910a019fa31f64c68d72e9509190444657b7bfc5ac3254ec10d8d"
+    },
+    {
+      "status": "M",
+      "path": "tools/seat-kit/fleet_executor.py",
+      "sha256": "5d59776ec642a272941045658a84e872bda1dbcea32abdaf09e8c1a6dd8d7a41"
+    },
+    {
+      "status": "M",
+      "path": "tools/seat-kit/seat_new.py",
+      "sha256": "27d707f1f4c5f15ed5ca3f4fd12b57adea6501a1959dfff94e719d57efaebffc"
+    },
+    {
+      "status": "M",
+      "path": "tools/seat-kit/tests/test_event_seat.py",
+      "sha256": "895582943c4b2e1479344ee16a3d3f7e5df35492b25892d6bce5ab941f7d5612"
+    },
+    {
+      "status": "M",
+      "path": "tools/seat-kit/tests/test_seat_new.py",
+      "sha256": "d235a174fa66fd9878d61ecf8d62b44c4f20267905b1e34dd573bc5329af17d1"
+    }
+  ]
+}

@@ -40,6 +40,93 @@ SPEC.loader.exec_module(butler)
 NOW = butler.datetime(2026, 9, 16, 12, 0, tzinfo=butler.timezone.utc)
 
 
+def _accepted_ticket_fixture(ticket_id: str, project: str, sha: str,
+                             report: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    submission = {
+        "branch": f"platform/{project}-{ticket_id}",
+        "commit_hash": sha,
+        "submitted_by_principal_id": f"PR-worker-{project}",
+        "notes": f"Candidate {sha}; branch_and_commit: platform/{project}-{ticket_id} @ {sha}",
+        "test_output": report,
+    }
+    review = {
+        "verdict": "approve", "status_to": "closed", "submission_commit": sha,
+        "reviewed_by_principal_id": f"PR-reviewer-{project}",
+        "review_notes": f"Independent review of exact submitted SHA {sha}. {report}",
+    }
+    return submission, review
+
+
+def test_final_validation_rejects_reported_failure_even_with_pass_and_exact_head() -> None:
+    head = "d" * 40
+    assert butler._final_validation_evidence_passed(f"All checks PASS at {head}.", head)
+    assert not butler._final_validation_evidence_passed(
+        f"Scoped check PASS at {head}; full project validation FAIL at {head}.", head)
+    assert not butler._final_validation_evidence_passed(
+        f"All checks PASS at {'e' * 40}.", head)
+
+
+def test_independent_ticket_acceptance_is_generic_and_not_global_green() -> None:
+    from pursers_client.project_workflow import parse_project_workflow, reconcile
+
+    cases = (
+        ("TK-project-red", "project-red", "a" * 40,
+         "Scoped check PASS (7 tests). Full typecheck FAIL: 55 diagnostics; unrelated audit FAIL: 9 findings."),
+        ("TK-project-blue", "project-blue", "b" * 40,
+         "Target validation PASS: 4 tests. Repository lint FAIL: 12 errors; formatter FAIL: 3 files."),
+    )
+    for ticket_id, project, sha, report in cases:
+        submission, review = _accepted_ticket_fixture(ticket_id, project, sha, report)
+        accepted_scope = butler._accepted_ticket_scope_evidence(
+            ticket_id, submission, review, report
+        )
+        assert accepted_scope == {
+            "scope_id": "ticket_submission",
+            "acceptance_basis": "current_exact_sha_independent_review",
+            "approved_sha": sha,
+            "report_preserved_verbatim": True,
+            "final_validation_required": True,
+        }
+        assert report in review["review_notes"]
+        raw = {"schema_version": 1, "workflow_id": f"workflow:{project}",
+               "project_id": project, "board_id": f"board-{project}",
+               "cohort_id": f"cohort-{project}", "sealed": True, "nodes": [
+                   {"node_id": "foundation", "ticket_id": ticket_id, "requires": [],
+                    "acceptance_checks": ["declared ticket scope independently accepted"]},
+                   {"node_id": "dependent", "ticket_id": f"TK-dependent-{project}",
+                    "requires": ["foundation"], "acceptance_checks": ["dependent checks"]}],
+               "final_validation": {"title": "Combined validation",
+                                    "acceptance_checks": ["all configured project checks pass"]}}
+        policy = parse_project_workflow(raw, project_id=project, board_id=f"board-{project}")
+        accepted_ticket = {"status": "closed", "latest_submission": submission,
+                           "latest_verdict": review}
+        dependent_id = f"TK-dependent-{project}"
+        dependent = {"status": "open", "parked": True}
+        intent = reconcile(policy, {ticket_id: accepted_ticket, dependent_id: dependent},
+                           combined_revision="c" * 40)
+        assert intent["releases"] == [dependent_id]
+        assert intent["all_accepted"] is False
+        assert intent["final_task"] is None
+        assert accepted_scope["final_validation_required"] is True
+
+        # Rejected/unapproved, stale-SHA and same-principal records cannot
+        # establish acceptance; a missing report also fails closed.
+        for bad_review in (
+            dict(review, verdict="reject"),
+            dict(review, submission_commit="c" * 40),
+            dict(review, reviewed_by_principal_id=submission["submitted_by_principal_id"]),
+        ):
+            assert butler._accepted_ticket_scope_evidence(
+                ticket_id, submission, bad_review, report
+            ) is None
+        assert butler._accepted_ticket_scope_evidence(
+            ticket_id, submission, review, ""
+        ) is None
+        unaccepted = {"status": "closed", "latest_submission": submission,
+                      "latest_verdict": dict(review, verdict="reject")}
+        assert reconcile(policy, {ticket_id: unaccepted, dependent_id: dependent})["releases"] == []
+
+
 class Source:
     def __init__(self) -> None:
         self.tickets: dict[str, dict[str, Any]] = {}
@@ -281,7 +368,7 @@ def args(tmp_path: Path, *, dry_run: bool = False) -> argparse.Namespace:
     token = tmp_path / "token.jwt"
     token.write_text("opaque", encoding="utf-8")
     repo = tmp_path / "repo"
-    repo.mkdir()
+    repo.mkdir(exist_ok=True)
     return argparse.Namespace(
         url="https://central.invalid/mcp",
         token_path=token,
@@ -318,6 +405,319 @@ def cli_args(tmp_path: Path) -> list[str]:
         "--cursor-file",
         str(tmp_path / "cursor.json"),
     ]
+
+
+def test_resident_project_workflow_releases_approved_dependency_only_when_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pursers_client.project_workflow import parse_project_workflow, policy_digest
+
+    options = args(tmp_path)
+    options.runtime_mode = "active"
+    backend = butler.CentralBackend(options, "opaque")
+    raw = {
+        "schema_version": 1, "workflow_id": "workflow:test", "project_id": "sample",
+        "board_id": "sample-board", "cohort_id": "cohort:test", "sealed": True,
+        "nodes": [
+            {"node_id": "root", "ticket_id": "TK-root", "requires": [],
+             "acceptance_checks": ["exact reviewed source"]},
+            {"node_id": "child", "ticket_id": "TK-child", "requires": ["root"],
+             "acceptance_checks": ["declared scope accepted"]},
+        ],
+        "final_validation": {"title": "Final QA", "acceptance_checks": ["full configured gate"]},
+    }
+    policy = parse_project_workflow(raw, project_id="sample", board_id="sample-board")
+    project = SimpleNamespace(
+        name="sample", board_id="sample-board", butler_workflow=raw,
+        butler_workflow_activation={"schema_version": 1, "state": "active",
+                                   "policy_sha256": policy_digest(policy),
+                                   "activation_id": "operator:test"},
+        work_dir_owner="operator", work_dir="/tmp/sample",
+        fleet_clone_dir=None, repository_url=None,
+    )
+    calls: list[tuple[str, Any]] = []
+
+    class Client:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_exc):
+            return None
+        async def ticket_update(self, ticket_id, **fields):
+            calls.append(("update", ticket_id, fields))
+            return {"ok": True}
+        async def ticket_history_list(self, ticket_id, history, **kwargs):
+            field = "submission_history" if history == "submissions" else "review_history"
+            return {"entries": [{"value": row} for row in tickets.get(ticket_id, {}).get(field, [])],
+                    "retention_complete": True, "has_more": False}
+        async def ticket_create(self, *args, **kwargs):
+            calls.append(("create", args, kwargs))
+            return {"ticket_id": args[0]}
+
+    monkeypatch.setattr(backend, "_client_for_board", lambda *_a, **_k: Client())
+    submission = {"branch": "pursers/root", "commit_hash": "a" * 40,
+                  "submitted_by_principal_id": "PR-worker",
+                  "notes": "test_output: checks passed"}
+    review = {"verdict": "approve", "status_to": "closed",
+              "submission_commit": "a" * 40,
+              "submitted_by_principal_id": "PR-worker",
+              "reviewed_by_principal_id": "PR-reviewer"}
+    approved = {
+        "target_url": "sample/feature", "status": "closed",
+        "latest_submission": submission, "submission_history": [submission],
+        "latest_verdict": review, "review_history": [review],
+    }
+    tickets = {"TK-root": approved, "TK-child": {
+        "target_url": "sample/feature", "status": "open", "parked": True}}
+    registry = {"schema_version": 1, "projects": {"sample": {
+        "board_id": "sample-board", "status": "active", "fleet": True,
+        "work_dir": "/tmp/sample", "work_dir_owner": "operator"}}}
+    tickets["TK-root"]["target_url"] = "sample/root"
+    tickets["TK-child"]["target_url"] = "sample/child"
+    result = asyncio.run(backend._reconcile_project_workflows(
+        "sample-board", [project], tickets, registry=registry))
+    assert calls == [("update", "TK-child", {"parked": False})], result
+    assert result[0]["kind"] == "workflow_dependency_released"
+
+    calls.clear()
+    project.butler_workflow_activation = None
+    assert asyncio.run(backend._reconcile_project_workflows(
+        "sample-board", [project], tickets, registry=registry)) == []
+    assert calls == []
+
+
+def test_resident_releases_dependency_for_exact_accepted_ticket_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pursers_client.project_workflow import parse_project_workflow, policy_digest
+
+    ticket_id = "TK-foundation-green"
+    submission, review = _accepted_ticket_fixture(
+        ticket_id, "project-foundation", "a" * 40,
+        "Scoped target tests PASS (5 tests). Full repository checks remain assigned separately.")
+    board = "pursers"
+    raw = {"schema_version": 1, "workflow_id": "workflow:scoped-foundation",
+           "project_id": "frontend", "board_id": board, "cohort_id": "eol-wave",
+           "sealed": True, "nodes": [
+               {"node_id": "foundation", "ticket_id": ticket_id,
+                "requires": [], "acceptance_checks": ["approved declared ticket scope"]},
+               {"node_id": "feature", "ticket_id": "TK-dependent", "requires": ["foundation"],
+                "acceptance_checks": ["feature-owned tests"]}],
+           "final_validation": {"title": "FE10 final validation",
+                                "acceptance_checks": ["all full-project gates pass"]}}
+    normalized = parse_project_workflow(raw, project_id="frontend", board_id=board)
+    project = SimpleNamespace(
+        name="frontend", board_id=board, status="active", butler_workflow=raw,
+        butler_workflow_activation={"schema_version": 1, "state": "active",
+                                   "policy_sha256": policy_digest(normalized),
+                                   "activation_id": "operator:accepted-scope"},
+        work_dir_owner="fleet", work_dir=str(tmp_path), fleet_clone_dir=str(tmp_path),
+        repository_url="https://example.test/frontend.git",
+    )
+    options = args(tmp_path)
+    options.runtime_mode = "active"
+    backend = butler.CentralBackend(options, "opaque")
+    calls = []
+    tickets = {
+        ticket_id: {
+            "target_url": "frontend/foundation", "status": "closed",
+            "latest_submission": submission, "submission_history": [submission],
+            "latest_verdict": review, "review_history": [review],
+        },
+        "TK-dependent": {"target_url": "frontend/feature", "status": "open", "parked": True},
+    }
+
+    class Client:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_exc):
+            return None
+        async def ticket_history_list(self, ticket_id, history, **_kwargs):
+            field = "submission_history" if history == "submissions" else "review_history"
+            return {"entries": [{"value": row} for row in tickets[ticket_id].get(field, [])],
+                    "retention_complete": True, "has_more": False}
+        async def ticket_update(self, ticket_id, **fields):
+            calls.append((ticket_id, fields))
+            return {"ok": True}
+
+    monkeypatch.setattr(backend, "_client_for_board", lambda *_a, **_k: Client())
+    registry = {"schema_version": 1, "projects": {"frontend": {
+        "board_id": board, "status": "active", "fleet": True,
+        "work_dir": str(tmp_path), "work_dir_owner": "fleet",
+        "fleet_clone_dir": str(tmp_path), "repository_url": project.repository_url,
+        "butler_workflow": raw,
+        "butler_workflow_activation": project.butler_workflow_activation,
+    }}}
+    result = asyncio.run(backend._reconcile_project_workflows(
+        board, [project], tickets, registry=registry))
+    assert calls == [("TK-dependent", {"parked": False})], result
+    assert result == [{"kind": "workflow_dependency_released", "ticket_id": "TK-dependent",
+                       "project": "frontend", "result": True}]
+
+
+def test_resident_workflow_creates_restart_safe_readable_final_qa_packet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pursers_client.project_workflow import (
+        parse_final_validation_packet_index, parse_project_workflow, policy_digest,
+    )
+
+    options = args(tmp_path)
+    options.runtime_mode = "active"
+    backend = butler.CentralBackend(options, "opaque")
+    raw = {
+        "schema_version": 1, "workflow_id": "workflow:qa", "project_id": "sample",
+        "board_id": "sample-board", "cohort_id": "cohort:qa", "sealed": True,
+        "nodes": [
+            {"node_id": "origin_a", "ticket_id": "TK-origin-a", "requires": [],
+             "acceptance_checks": ["scope A accepted"]},
+            {"node_id": "origin_b", "ticket_id": "TK-origin-b", "requires": [],
+             "acceptance_checks": ["scope B accepted"]},
+        ],
+        "final_validation": {"title": "Frozen cohort QA", "acceptance_checks": [
+            "all project checks pass on the exact combined revision"]},
+    }
+    normalized = parse_project_workflow(raw, project_id="sample", board_id="sample-board")
+    project = SimpleNamespace(
+        name="sample", board_id="sample-board", butler_workflow=raw,
+        butler_workflow_activation={"schema_version": 1, "state": "active",
+                                   "policy_sha256": policy_digest(normalized),
+                                   "activation_id": "operator:qa"},
+        work_dir_owner="fleet", work_dir=str(tmp_path / "repo"),
+        fleet_clone_dir=str(tmp_path / "repo"),
+        repository_url="https://example.test/sample.git",
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", project.repository_url], check=True)
+
+    def commit(path: str, content: str) -> str:
+        target = repo / path
+        target.write_text(content, encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", path], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", content], check=True)
+        return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    sha_a = commit("a.txt", "A")
+    sha_b = commit("b.txt", "B")
+    def accepted_ticket(ticket_id: str, sha: str) -> dict[str, Any]:
+        submission = {"branch": f"pursers/{ticket_id}", "commit_hash": sha,
+                      "submitted_by_principal_id": f"PR-worker-{ticket_id}",
+                      "notes": "test_output: checks passed", "test_output": "checks passed"}
+        review = {"verdict": "approve", "status_to": "closed",
+                  "submission_commit": sha,
+                  "submitted_by_principal_id": f"PR-worker-{ticket_id}",
+                  "reviewed_by_principal_id": "PR-independent-reviewer"}
+        return {
+            "ticket_id": ticket_id, "target_url": f"sample/{ticket_id}", "status": "closed",
+            "latest_submission": submission, "submission_history": [submission],
+            "latest_verdict": review, "review_history": [review],
+        }
+
+    calls: list[tuple[str, Any]] = []
+    from pursers_client.project_workflow import final_validation_ticket_id
+    final_id = final_validation_ticket_id(normalized)
+    rows: dict[str, dict[str, Any]] = {
+        "TK-origin-a": accepted_ticket("TK-origin-a", sha_a),
+        "TK-origin-b": accepted_ticket("TK-origin-b", sha_b),
+    }
+
+    class Client:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_exc):
+            return None
+        async def ticket_update(self, ticket_id, **fields):
+            calls.append(("update", ticket_id, fields))
+            return {"ok": True}
+        async def ticket_history_list(self, ticket_id, history, **kwargs):
+            field = "submission_history" if history == "submissions" else "review_history"
+            return {"entries": [{"value": row} for row in rows.get(ticket_id, {}).get(field, [])],
+                    "retention_complete": True, "has_more": False}
+        async def ticket_create(self, ticket_id, title, **fields):
+            calls.append(("create", ticket_id, title, fields))
+            row = {"ticket_id": ticket_id, "status": "open",
+                   "description": fields["description"], "annotations": []}
+            rows[ticket_id] = row
+            return {"ticket_id": ticket_id, "ticket": row}
+        async def ticket_annotate(self, ticket_id, text, *, kind="note"):
+            calls.append(("annotate", ticket_id, kind, text))
+            rows[ticket_id]["annotations"].append({"kind": kind, "text": text})
+            return {"ok": True}
+
+    monkeypatch.setattr(backend, "_client_for_board", lambda *_a, **_k: Client())
+    prepared = {"schema_version": 1, "state": "prepared", "combined_revision": "c" * 40,
+                "member_manifest": {"TK-origin-a": sha_a, "TK-origin-b": sha_b}}
+    marker = "workflow_delivery_sha256: " + "d" * 64
+    async def prepare(_runtime, _delivery, _workflow, _members, **_kwargs):
+        return {**prepared, "combined_revision": sha_b}
+    monkeypatch.setitem(sys.modules, "workflow_delivery", SimpleNamespace(
+        prepare_workflow_delivery=prepare,
+        workflow_delivery_attestation=lambda _prepared: marker))
+    async def runtime_factory(_project):
+        return object(), {"mode": "batch_pr"}
+    monkeypatch.setattr(backend, "_workflow_delivery_runtime", runtime_factory)
+    registry = {"schema_version": 1, "projects": {"sample": {
+        "board_id": "sample-board", "status": "active", "fleet": True,
+        "work_dir": str(repo), "fleet_clone_dir": str(repo),
+        "work_dir_owner": "fleet", "repository_url": project.repository_url}}}
+    first = asyncio.run(backend._reconcile_project_workflows(
+        "sample-board", [project], rows, registry=registry))
+    assert [action["kind"] for action in first] == ["workflow_final_validation_created"], first
+    creates = [call for call in calls if call[0] == "create"]
+    assert len(creates) == 1 and creates[0][1] == final_id
+    assert creates[0][3]["scope"] == "interactive-no-send"
+    assert creates[0][3]["target_url"] == project.name
+    description = creates[0][3]["description"]
+    index = parse_final_validation_packet_index(description)
+    pages = [call[3] for call in calls if call[0] == "annotate"]
+    assert pages and all(call[1] == final_id and call[2] == "evidence" for call in calls if call[0] == "annotate")
+    assert description.startswith("Butler workflow final-validation evidence index v1\n{")
+    packet_body = "".join(page.split(":", 4)[4] for page in pages)
+    assert hashlib.sha256(packet_body.encode()).hexdigest() == index["evidence_packet"]["sha256"]
+    packet = json.loads(packet_body)
+    assert packet["combined_revision"] == sha_b
+    assert packet["members"] == {"TK-origin-a": sha_a, "TK-origin-b": sha_b}
+    assert packet["acceptance_checks"] == normalized["final_validation"]["acceptance_checks"]
+
+    # Restart with only the Central ticket evidence: deterministically recover
+    # missing pages and never create another QA scope.
+    calls.clear()
+    rows[final_id]["annotations"].pop()
+    restarted = asyncio.run(backend._reconcile_project_workflows("sample-board", [project], rows))
+    assert restarted == []
+    assert not any(call[0] == "create" for call in calls)
+    assert len([call for call in calls if call[0] == "annotate"]) == 1
+
+
+def test_resident_project_workflow_blocks_partial_manifest_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pursers_client.project_workflow import parse_project_workflow, policy_digest
+
+    options = args(tmp_path)
+    options.runtime_mode = "active"
+    backend = butler.CentralBackend(options, "opaque")
+    raw = {
+        "schema_version": 1, "workflow_id": "workflow:partial", "project_id": "sample",
+        "board_id": "sample-board", "cohort_id": "cohort:partial", "sealed": True,
+        "nodes": [{"node_id": "root", "ticket_id": "TK-root", "requires": [],
+                   "acceptance_checks": ["exact independent review"]}],
+        "final_validation": {"title": "Final QA", "acceptance_checks": ["full gate"]},
+    }
+    policy = parse_project_workflow(raw, project_id="sample", board_id="sample-board")
+    project = SimpleNamespace(name="sample", board_id="sample-board", butler_workflow=raw,
+        butler_workflow_activation={"schema_version": 1, "state": "active",
+                                   "policy_sha256": policy_digest(policy), "activation_id": "op"})
+    calls: list[Any] = []
+    monkeypatch.setattr(backend, "_client_for_board", lambda *_a, **_k: calls.append("client"))
+    result = asyncio.run(backend._reconcile_project_workflows("sample-board", [project], {}))
+    assert result == [{"kind": "workflow_blocked", "project": "sample",
+                       "reason": "sealed_manifest_projection_incomplete"}]
+    assert calls == []
 
 
 def test_approval_scan_budget_is_bounded(tmp_path: Path) -> None:
@@ -370,6 +770,22 @@ def test_active_mode_requires_separate_private_authorization(
         butler.parse_args(
             [*base, "--active-authorization-file", str(authorization)]
         )
+
+
+def test_registry_active_scope_requires_private_authorization(tmp_path: Path) -> None:
+    authorization = tmp_path / "active.json"
+    base = [*cli_args(tmp_path), "--runtime-mode", "active", "--act-on-registry"]
+    with pytest.raises(SystemExit):
+        butler.parse_args(base)
+    authorization.write_text(json.dumps({"schema_version": 1, "mode": "active", "authorized": True}))
+    authorization.chmod(0o600)
+    parsed = butler.parse_args([*base, "--active-authorization-file", str(authorization)])
+    assert parsed.act_on_registry is True
+    assert butler.acting_registry_boards(parsed, {"home", "future"}) == {"home", "future"}
+    parsed.runtime_mode = "shadow"
+    assert butler.acting_registry_boards(parsed, {"home", "future"}) == set()
+    with pytest.raises(SystemExit):
+        butler.parse_args([*cli_args(tmp_path), "--act-on-registry"])
 
 
 def test_intake_onboarding_config_is_private_bounded_and_absolute(
@@ -4890,7 +5306,7 @@ def test_approved_not_landed_observer_reuses_equivalent_content_check(
     tmp_path: Path,
 ) -> None:
     repo = tmp_path / "repo"
-    repo.mkdir()
+    repo.mkdir(exist_ok=True)
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
@@ -5191,6 +5607,7 @@ def test_mature_board_hydrates_closed_approval_without_intake_snapshot(
     approved = {
         "ticket_id": "TK-approved-closed",
         "title": "Approved but not landed",
+        "target_url": "mature-project/",
         "status": "closed",
         "review_verdict": "approve",
         "updated_at": (NOW - butler.timedelta(days=2)).isoformat(),
@@ -5253,6 +5670,18 @@ def test_mature_board_hydrates_closed_approval_without_intake_snapshot(
         ) -> Mapping[str, Any]:
             return {"ticket": by_id[ticket_id]}
 
+    class RegistryClient:
+        async def board_state_get(self, key: str) -> Mapping[str, Any]:
+            assert key == "project_registry"
+            return {"state": {"value": json.dumps({
+                "schema_version": 1,
+                "projects": {"mature-project": {
+                    "board_id": "mature-board", "status": "active",
+                    "work_dir": str(options.repo), "fleet": True,
+                }},
+            })}}
+
+    backend.client = RegistryClient()
     monkeypatch.setattr(pursers_client, "BoardClient", lambda *_args, **_kwargs: Client())
     api = butler._stranded_approvals_api()
     monkeypatch.setitem(
@@ -5681,7 +6110,7 @@ def test_module_has_only_bounded_question_answer_ticket_mutation() -> None:
     assert source.count("client.ticket_question_answer(") == 3
     assert "host_binding" not in source
     assert "ticket_update(action.ticket_id, parked=True)" in source
-    assert source.count("ticket_annotate(") == 3
+    assert source.count("ticket_annotate(") == 4
     assert "client.ticket_annotate(ticket_id, text, kind=\"note\")" in source
     assert "board_catchup" not in source
     assert "ticket_list" not in source
@@ -6087,18 +6516,35 @@ def test_registry_refresh_continues_after_list_get_delete_race(
             return None
 
     snapshots = {
-        "home": {"coordination_tickets": [{"ticket_id": "TK-home"}]},
+        "home": {"agents": [], "coordination_tickets_complete": True,
+                 "coordination_tickets": [{"ticket_id": "TK-home", "status": "open", "tier": 1}]},
         "away": {
+            "agents": [], "coordination_tickets_complete": True,
             "coordination_tickets": [
-                {"ticket_id": "TK-away"},
-                {"ticket_id": "TK-removed"},
+                {"ticket_id": "TK-away", "status": "open", "tier": 1},
+                {"ticket_id": "TK-removed", "status": "open", "tier": 1},
             ]
         },
     }
 
     async def read_cycle(_reader: Reader, _home: str) -> tuple[Any, Any, Any]:
-        projects = [SimpleNamespace(board_id="home"), SimpleNamespace(board_id="away")]
+        projects = [
+            SimpleNamespace(name=name, board_id=name, status="active", work_dir=str(tmp_path / name),
+                            butler_workflow=None, butler_workflow_activation=None,
+                            work_dir_owner="operator", fleet_clone_dir=None, repository_url=None)
+            for name in ("home", "away")
+        ]
         return projects, snapshots, {"home": {}, "away": {}}
+
+    async def state_call(_reader: Reader, _name: str, _board: str, **_kwargs: Any) -> Mapping[str, Any]:
+        # This test isolates a ticket list/get/delete race; the registry read is
+        # supplied independently by the resident and need not alter this case.
+        return {"state": {"value": json.dumps({"schema_version": 1, "projects": {
+            name: {"board_id": name, "status": "active", "work_dir": str(tmp_path / name)}
+            for name in ("home", "away")
+        }})}}
+
+    Reader.call = state_call
 
     async def coordinator_run(_parsed: argparse.Namespace) -> None:
         return None
@@ -6179,3 +6625,198 @@ def test_registry_refresh_continues_after_list_get_delete_race(
             {"operation": "ticket_get", "reason_code": "ticket_disappeared"}
         ]
     }
+
+
+def test_refresh_keeps_authoritative_registry_for_native_source_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise resident refresh with the real coordinator read_cycle contract."""
+    import runpy
+
+    options = args(tmp_path, dry_run=True)
+    options.runtime_mode = "active"
+    options.repo = REPOSITORY_ROOT
+    options.act_on_board = []
+    backend = butler.CentralBackend(options, "opaque")
+
+    from pursers_client.project_workflow import parse_project_workflow, policy_digest
+
+    workflow = {
+        "schema_version": 1, "workflow_id": "workflow:source-guard",
+        "project_id": "managed", "board_id": "managed-board", "cohort_id": "source-guard",
+        "sealed": True,
+        "nodes": [{"node_id": "source", "ticket_id": "TK-source-member", "requires": [],
+                   "acceptance_checks": ["independent exact-SHA review"]}],
+        "final_validation": {"title": "Source final QA", "acceptance_checks": ["exact combined source"]},
+    }
+    parsed = parse_project_workflow(workflow, project_id="managed", board_id="managed-board")
+    activation = {"schema_version": 1, "state": "active", "policy_sha256": policy_digest(parsed),
+                  "activation_id": "operator:source-guard"}
+    root, legacy_root = tmp_path / "managed-repo", tmp_path / "legacy-repo"
+    root.mkdir()
+    legacy_root.mkdir()
+    registry_doc = {"schema_version": 1, "projects": {
+        "managed": {"board_id": "managed-board", "status": "active", "fleet": True,
+                    "work_dir": str(root), "work_dir_owner": "fleet",
+                    "butler_workflow": workflow, "butler_workflow_activation": activation},
+        "legacy": {"board_id": "managed-board", "status": "active", "fleet": True,
+                    "work_dir": str(legacy_root), "work_dir_owner": "fleet"},
+    }}
+    registry_state = {"state": {"value": json.dumps(registry_doc)}}
+    seen_registry_reads: list[tuple[str, str]] = []
+    coordinator = runpy.run_path(str(REPOSITORY_ROOT / "tools/coordinator/coordinator.py"))
+
+    class Reader:
+        def __init__(self, *_args: Any) -> None:
+            pass
+        async def __aenter__(self) -> "Reader":
+            return self
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+        async def call(self, name: str, board_id: str, **kwargs: Any) -> Mapping[str, Any]:
+            if name == "board_state_get" and kwargs.get("key") == "project_registry":
+                seen_registry_reads.append((board_id, kwargs["key"]))
+                return registry_state
+            if name == "board_snapshot":
+                raise RuntimeError("test projection intentionally unavailable")
+            if name == "ticket_list":
+                include_closed = kwargs["include_closed"]
+                return {"ok": True, "tickets": [], "count": 0, "returned_count": 0,
+                        "total_matching": 0, "next_cursor": None, "has_more": False,
+                        "view": "work", "include_dispatch_history": False,
+                        "read_consistency": "live", "watermark": 0, "latest_seq": 0,
+                        "filters": {"status": None, "assigned_to": None,
+                                    "include_closed": include_closed, "include_archived": True,
+                                    "review_unclaimed_only": False, "ticket_ids": None}}
+            if name == "board_state_get":
+                raise RuntimeError("state key not found")
+            raise AssertionError((name, board_id, kwargs))
+
+    coordinator["RawReader"] = Reader
+    async def coordinator_run(_args: Any) -> None:
+        return None
+    coordinator["run"] = coordinator_run
+    coordinator["parse_args"] = lambda _argv: argparse.Namespace()
+    monkeypatch.setattr(backend, "_coordinator_api", lambda: coordinator)
+    monkeypatch.setattr(backend, "_schedule_approval_scan", lambda *_args: {})
+    poller = object.__new__(butler.SourceIntakePoller)
+    poller.sources = ()
+    poller.runtimes = {}
+    poller.registry_projects = lambda: {}
+    poller.state_reader = lambda _board: asyncio.sleep(0)
+    poller.state_writer = lambda *_args: asyncio.sleep(0)
+    poller.ticket_reader = lambda *_args: asyncio.sleep(0)
+    poller.ticket_annotator = lambda *_args: asyncio.sleep(0)
+    poller.active = False
+    poller._round_robin = 0
+    poller.ceiling = None
+    poller.decide = None
+    poller.project_reader = None
+    poller._writeback_offset = 0
+    poller._integration_offset = 0
+    poller._batch_delivery_runtimes = {}
+    poller._writeback_grants = set()
+    backend.source_intake_poller = poller
+
+    result = asyncio.run(backend.refresh_registry_findings(NOW))
+    assert result["active_boards"] == []  # snapshot failure remains fail-closed
+    assert seen_registry_reads == [("pursers", "project_registry"),
+                                   ("pursers", "project_registry")]
+    assert backend._workflow_registry["projects"]["managed"]["butler_workflow"]["nodes"] == workflow["nodes"]
+
+    # Exercise SourceIntakePoller's real legacy decision boundary: a bound
+    # active native cohort defers, while an unconfigured Sonar project retains
+    # its previous writeback path.
+    poller = backend.source_intake_poller
+    assert poller.workflow_owned == backend._source_ticket_workflow_owned
+    poller.index = butler.SourceIntakeIndex()
+    async def legacy_writeback_reached(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("legacy-writeback-reached")
+    poller._writeback_fields = legacy_writeback_reached
+    source = SimpleNamespace(source_id="fixture-source", writeback=SimpleNamespace(on="approved"))
+    approved = {"status": "closed", "review_verdict": "approve",
+                "target_url": "managed/item", "ticket_id": "TK-intake-managed"}
+    legacy = {"status": "closed", "review_verdict": "approve",
+              "target_url": "legacy/item", "ticket_id": "TK-intake-legacy"}
+    assert asyncio.run(poller._maybe_writeback(source, object(), "managed-board",
+        approved["ticket_id"], approved, {"external_id": "managed-1", "revision": "r1"})) is False
+    with pytest.raises(RuntimeError, match="legacy-writeback-reached"):
+        asyncio.run(poller._maybe_writeback(source, object(), "managed-board",
+            legacy["ticket_id"], legacy, {"external_id": "legacy-1", "revision": "r1"}))
+
+    backend._workflow_registry = None
+    with pytest.raises(butler.ConnectorDenied, match="registry is unavailable"):
+        asyncio.run(backend._source_ticket_workflow_owned("managed-board", approved))
+
+
+def test_native_source_delivery_settles_correlated_pr_replay_and_branch_only(tmp_path):
+    backend = object.__new__(butler.CentralBackend)
+    ticket_id = "TK-intake-native"
+    source = SimpleNamespace(source_id="sonar", routing=SimpleNamespace(
+        project_hint_is_registry_key=True, project_map={}))
+    index = butler.SourceIntakeIndex(tmp_path / "source-index.json")
+    index.put("sonar", "ISSUE-1", {
+        "status": "asked", "source_id": "sonar", "external_id": "ISSUE-1",
+        "member_ids": '["ISSUE-1"]', "board_id": "board",
+        "ticket_id": ticket_id, "project_hint": "Project"})
+    backend.source_intake_poller = SimpleNamespace(index=index, sources=[source])
+    prepared = {
+        "batch_key": "batch-1", "combined_revision": "a" * 40,
+        "delivery_policy_revision": "policy-1", "cohort_id": "cohort-1",
+        "workflow_policy_sha256": "b" * 64, "final_validation_policy_sha256": "c" * 64,
+        "member_manifest": {ticket_id: "d" * 40},
+        "member_refs": {ticket_id: "refs/heads/feature"},
+        "member_evidence_digests": {ticket_id: "e" * 64},
+    }
+    delivery_binding = {key: prepared[key] for key in (
+        "cohort_id", "workflow_policy_sha256", "final_validation_policy_sha256",
+        "member_manifest", "member_refs", "member_evidence_digests", "combined_revision")}
+    snapshot_branch = "pursers/snapshots/batch-1"
+    member = {"ticket_id": ticket_id, "origin": "managed-source", "issue_ids": ["ISSUE-1"]}
+    result = {"state": "in_delivery", "batch_key": "batch-1", "released": True}
+
+    class Adapter:
+        async def read_ref(self, _repository, _branch):
+            return "a" * 40
+        async def get_customer_pr(self, _repository, pr_id):
+            return {"id": pr_id, "status": "active", "correlation": "batch-1",
+                    "source_sha": "a" * 40, "source_branch": snapshot_branch,
+                    "target_branch": "customer/review"}
+
+    async def settle(mode, customer_pr, policy_mode):
+        index.entries[index.key("sonar", "ISSUE-1")]["status"] = "asked"
+        batch = {"batch_key": "batch-1", "state": "in_delivery", "mode": mode,
+            "effective_policy_revision": "policy-1", "working_head": "a" * 40,
+            "snapshot_sha": "a" * 40, "snapshot_frozen": True,
+            "snapshot_branch": snapshot_branch, "customer_pr": customer_pr,
+            "workflow_delivery": delivery_binding}
+        runtime = SimpleNamespace(adapter=Adapter(), ledger=SimpleNamespace(
+            document={"batches": {"batch-1": batch}}))
+        policy = {"mode": policy_mode, "repository": "https://example.invalid/repo",
+            "policy_revision": "policy-1", "snapshot_prefix": "pursers/snapshots",
+            "target_branch": "customer/review"}
+        assert await backend._settle_workflow_source_delivery(
+            "Project", "board", [member], "TK-qa", prepared, result, runtime, policy) == 1
+        entry = index.entries[index.key("sonar", "ISSUE-1")]
+        assert entry["status"] == "delivered"
+        assert entry["native_workflow_qa_ticket_id"] == "TK-qa"
+        assert entry["native_workflow_commit"] == "a" * 40
+        assert entry["delivery_state"] == ("branch_published" if mode == "branch_only" else "pr_created")
+        if mode == "branch_only":
+            assert entry["native_workflow_branch"] == snapshot_branch
+            assert "native_workflow_pr_id" not in entry
+        else:
+            assert entry["native_workflow_pr_id"] == "42"
+        persisted = butler.SourceIntakeIndex(index.path)
+        assert persisted.entries == index.entries and persisted.in_flight() == {}
+
+    async def scenario():
+        # Runtime replay omits pr_id; accept it only when the durable ledger and
+        # adapter independently confirm the exact correlated active PR.
+        await settle("batch_pr", {"id": 42, "correlation": "batch-1",
+            "source_sha": "a" * 40, "source_branch": snapshot_branch,
+            "target_branch": "customer/review"}, "batch_pr")
+        # Branch-only has no PR identifier; require the immutable snapshot ref.
+        await settle("branch_only", None, "branch_only")
+
+    asyncio.run(scenario())

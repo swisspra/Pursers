@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "captured_on": "2026-10-25",
+  "source_stage": "pursers-stale-repair-20261023/candidate",
+  "capture_method": "Read-only SSH; source and test digests verified before transfer and locally.",
+  "paired_production_files": [
+    {
+      "path": "tools/seat-kit/fleet_executor.py",
+      "sha256": "5d59776ec642a272941045658a84e872bda1dbcea32abdaf09e8c1a6dd8d7a41",
+      "matches_imported_production": true
+    },
+    {
+      "path": "tools/board-butler/fleet_observation.py",
+      "sha256": "18d9a4f0702084e3f1030396808c5dcf64461497cde9cb8033ae45a766004139",
+      "matches_imported_production": true
+    },
+    {
+      "path": "tools/board-butler/board_butler.py",
+      "sha256": "3d10c00394040e6bc5d002d238d84819a4e07dcc913fdfb58468f193539d5ad9",
+      "matches_imported_production": true
+    }
+  ],
+  "adopted_test_files": [
+    {
+      "original_relative_path": "tools/board-butler/tests/test_fleet_observation.py",
+      "repository_path": "tools/board-butler/tests/test_fleet_observation.py",
+      "sha256": "6d6cd1338194ad6f7ecc1d435d68e3633c51074b5305d48bb524a4d2ba16d335",
+      "bytes_preserved": true
+    },
+    {
+      "original_relative_path": "tools/board-butler/tests/test_stale_restart.py",
+      "repository_path": "tools/board-butler/tests/test_stale_seat_inventory.py",
+      "sha256": "3253b7af83e1d625dd8a0715e3cd78ba8772afed9513a2a67affbd3cf30e956f",
+      "bytes_preserved": true
+    },
+    {
+      "original_relative_path": "tools/seat-kit/tests/test_stale_restart.py",
+      "repository_path": "tools/seat-kit/tests/test_stale_restart.py",
+      "sha256": "87f126441ae42da6965a0611129fe24dbeca10be360cf0231d26a9eb7302c5f1",
+      "bytes_preserved": true
+    },
+    {
+      "original_relative_path": "tools/seat-kit/tests/test_reactivation_cycles.py",
+      "repository_path": "tools/seat-kit/tests/test_reactivation_cycles.py",
+      "sha256": "d534b73ac199bb5561ceff39f8e0c6e4542cc9c87096eb57757dad8dde5b6726",
+      "bytes_preserved": true
+    },
+    {
+      "original_relative_path": "tools/seat-kit/tests/test_reactivation_safety.py",
+      "repository_path": "tools/seat-kit/tests/test_reactivation_safety.py",
+      "sha256": "c39543531b8c2181acb477ffdfeaff0728178e60560317caba760e89b82c0955",
+      "bytes_preserved": true
+    }
+  ],
+  "focused_validation": {
+    "observer_and_stale_inventory_passed": 53,
+    "reactivation_and_executor_passed": 30,
+    "live_state_used": false
+  },
+  "excluded_stages": [
+    {
+      "stage": "tier-projection-repair-20261024-01/v3",
+      "base_coordinator_release": "5.0.8",
+      "base_coordinator_sha256": "d4b0f813afde0acf857f96008756e86de17ed54c360054e00adff39b4fd15cfd",
+      "current_coordinator_release": "5.2.1",
+      "patch_applies_to_current_source": true,
+      "adopted": false,
+      "reason": "Production reader change requiring forward-port, consumer integration and complete validation; full staged file derives from older source."
+    },
+    {
+      "stage": "approval-repair-20261024-01/v3",
+      "patch_applies_to_current_source": true,
+      "adopted": false,
+      "reason": "Production audit/Butler behavior changes with incomplete combined runtime acceptance; not required to repair the five source-validation failures."
+    }
+  ]
+}

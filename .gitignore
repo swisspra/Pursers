@@ -29,3 +29,9 @@ integrations/zed/pursers-mcp/target/
 CLAUDE.md
 AGENTS.md
 .zed/
+
+# Private deployment configuration, credentials, and local verification output
+/.local/
+*.jwt
+*.sqlite3-wal
+*.sqlite3-shm

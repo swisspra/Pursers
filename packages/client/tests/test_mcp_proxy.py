@@ -510,8 +510,9 @@ def test_worker_and_reviewer_profiles_are_exact_and_materially_smaller(
 async def _worker_and_reviewer_profiles_are_exact_and_materially_smaller(
     tmp_path: Path,
 ) -> None:
-    assert len(WORKER_TOOLS) == 10
-    assert len(REVIEWER_TOOLS) == 10
+    assert len(WORKER_TOOLS) == 11
+    assert len(REVIEWER_TOOLS) == 11
+    assert "ticket_history_list" in WORKER_TOOLS & REVIEWER_TOOLS
     token_file = tmp_path / "credential.jwt"
     token_file.write_text("opaque-test-credential", encoding="utf-8")
     profile_names = WORKER_TOOLS | REVIEWER_TOOLS
@@ -1879,3 +1880,122 @@ async def _stdio_framing_has_no_stdout_noise_and_completes_initialize(
     assert resource_capability is not None
     assert resource_capability.subscribe is False
     assert resource_capability.list_changed is False
+
+
+def test_role_relay_deduplicates_ticket_payload_without_losing_evidence(tmp_path):
+    async def exercise():
+        submission = {"commit_hash": "a" * 40, "test_output": "1 passed", "notes": "exact evidence"}
+        verdict = {"review_notes": "independent check", "fix_instructions": "repair fixture", "verdict": "reject"}
+        ticket = {"ticket_id": "TK-small", "status": "open", "description": "scope",
+                  "latest_submission": submission, "submission_history": [submission],
+                  "latest_verdict": verdict, "review_history": [verdict],
+                  "review_notes": verdict["review_notes"], "fix_instructions": verdict["fix_instructions"],
+                  "review_verdict": verdict["verdict"], "annotations": [{"text": "keep decision"}]}
+        upstream = _json_result({"ok": True, "ticket": ticket})
+        class Client(FakeClient):
+            async def call_tool(self, name, arguments=None, **kwargs):
+                self.calls.append((name, arguments or {}))
+                return upstream
+        fake = Client()
+        @asynccontextmanager
+        async def connect(_token):
+            yield fake
+        token = tmp_path / "token"; token.write_text("fixture")
+        relay = CentralRelay(central_url="http://localhost:8766", board="home",
+                             token_file=token, tools_mode="worker", connection_factory=connect)
+        relay._known_tools["ticket_get"] = types.Tool(name="ticket_get", inputSchema={
+            "type": "object", "properties": {"board_id": {}, "view": {}}, "required": []})
+        result = await relay.call_tool("ticket_get", {"ticket_id": "TK-small"})
+        assert fake.calls[-1][1]["view"] == "work"
+        actual = result.structured_content["ticket"]
+        assert actual["latest_submission"] == submission
+        assert actual["latest_verdict"] == verdict
+        assert actual["annotations"] == ticket["annotations"]
+        assert "submission_history" not in actual and "review_history" not in actual
+        assert "review_notes" not in actual and "fix_instructions" not in actual
+        assert json.loads(result.content[0].text) == result.structured_content
+        assert len(result.content[0].text) < len(upstream.content[0].text) * 0.7
+        assert upstream.structured_content["ticket"] == ticket
+        full = await relay.call_tool("ticket_get", {"ticket_id": "TK-small", "view": "full"})
+        assert full.structured_content["ticket"] == ticket
+    asyncio.run(exercise())
+
+
+def test_role_relay_preserves_nonduplicate_history_and_structured_errors(tmp_path):
+    relay = CentralRelay(central_url="http://localhost:8766", board="home", tools_mode="reviewer")
+    payload = {"ok": True, "ticket": {"ticket_id": "TK-one", "latest_submission": {"notes": "new"},
+               "submission_history": [{"notes": "old"}], "review_notes": "different"}}
+    result = relay._model_result("ticket_get", {}, _json_result(payload))
+    assert result.structured_content == payload
+    error = _json_result({"ok": False, "error": {"code": "review_not_offered", "message": "exact error"}})
+    error.is_error = True
+    assert relay._model_result("ticket_review_claim", {}, error) is error
+    default = CentralRelay(central_url="http://localhost:8766", board="home")
+    original = _json_result(payload)
+    assert default._model_result("ticket_get", {}, original) is original
+
+
+def test_role_relay_model_usage_schema_rejects_inferred_role(tmp_path):
+    async def exercise():
+        fake = ExistingIdentityClient(["worker-a"], "PR-existing", roles=["worker"])
+        fake.tool = types.Tool(name="ticket_submit", description="Submit", inputSchema={
+            "type": "object", "properties": {"board_id": {"type": "string"}, "agent_name": {"type": "string"},
+            "notes": {"type": "string"}, "model_usage": {"type": "object", "additionalProperties": True}},
+            "required": ["agent_name"]})
+        @asynccontextmanager
+        async def connect(_token): yield fake
+        token = tmp_path / "token"; token.write_text("fixture")
+        relay = CentralRelay(central_url="http://localhost:8766", board="existing-board",
+            token_file=token, tools_mode="worker", connection_factory=connect)
+        tool = (await relay._upstream_tools())[0]
+        schema = tool.input_schema["properties"]["model_usage"]
+        import jsonschema
+        usage = {"schema_version": 1, "turns": 1, "reported_turns": 1, "input_tokens": 10, "output_tokens": 2}
+        jsonschema.validate(usage, schema)
+        with pytest.raises(jsonschema.ValidationError): jsonschema.validate({**usage, "role": "worker"}, schema)
+        assert "clone-owning" in tool.description
+        assert "repository" not in tool.input_schema["required"]
+        jsonschema.validate(None, schema)
+        jsonschema.validate({"schema_version": 1, "turns": 2, "reported_turns": 1}, schema)
+        for invalid in ({**usage, "turns": True}, {**usage, "output_tokens": -1},
+                        {**usage, "schema_version": 2}, {"turns": 1}):
+            with pytest.raises(jsonschema.ValidationError):
+                jsonschema.validate(invalid, schema)
+    asyncio.run(exercise())
+
+
+def test_model_result_keeps_text_fallback_unique_content_and_metadata():
+    payload = {"ok": True, "ticket": {"latest_submission": {"test_output": "2 passed"},
+               "submission_history": [{"test_output": "2 passed"}]}}
+    relay = CentralRelay(central_url="http://localhost:8766", board="home", tools_mode="worker")
+    result = _json_result(payload)
+    result.meta = {"trace": "safe-fixture"}
+    result.content.append(types.TextContent(type="text", text="Unique warning: keep me"))
+    compact = relay._model_result("ticket_get", {}, result)
+    assert json.loads(compact.content[0].text) == compact.structured_content
+    assert compact.content[1].text == "Unique warning: keep me"
+    assert compact.meta == result.meta
+    assert result.structured_content == payload
+    image = types.ImageContent(type="image", data="AA==", mimeType="image/png")
+    result.content.append(image)
+    compact = relay._model_result("ticket_get", {}, result)
+    assert compact.content[-1] is image
+    assert compact.content[1].text == "Unique warning: keep me"
+    unique = types.CallToolResult(content=[types.TextContent(type="text", text="only evidence here")],
+                                 structuredContent={"ok": True})
+    assert relay._model_result("ticket_get", {}, unique) is unique
+
+
+def test_compact_ticket_list_preserves_distinct_history_and_routing():
+    from pursers_client.model_output import compact_ticket_payload
+    submission = {"notes": "exact evidence", "test_output": "3 passed"}
+    payload = {"board_id": "fixture", "work_dir": "/fixture/repo", "routing_error": {"code": "missing"},
+               "tickets": [{"latest_submission": submission, "submission_history": [submission]},
+                           {"latest_submission": submission, "submission_history": [{"notes": "older"}, submission]}]}
+    compact = compact_ticket_payload(payload)
+    assert compact["board_id"] == payload["board_id"]
+    assert compact["routing_error"] == payload["routing_error"]
+    assert compact["work_dir"] == payload["work_dir"]
+    assert "submission_history" not in compact["tickets"][0]
+    assert compact["tickets"][1] == payload["tickets"][1]
+    assert payload["tickets"][0]["submission_history"] == [submission]

@@ -23,6 +23,28 @@ duplicate rows, role/board/provider/host limits, the approved template pool,
 and one bounded limiting reason: `role_cap`, `template_pool`, `authorization`,
 `headroom`, `provider`, `cooldown`, or `none`.
 
+## Registry default and periodic budgets
+
+A human-authorized shared control pool covers newly admitted active WORK registry
+boards automatically, subject to exact membership/readiness validation. It does
+not create another pool or duplicate the host ceiling per board. Mechanical
+annotation/parking scope is separate: `--act-on-registry` explicitly opts current
+and future active registry boards into those two actions, still requiring active
+runtime mode and the private active-authorization file. Paused projects remain
+excluded; the existing repeated `--act-on-board` allowlist remains supported.
+
+Each `desired.budget` and `envelope.max_budget` dimension accepts a nonnegative
+integer or explicit JSON `null`. Null means no periodic cap for that dimension;
+zero remains a zero allowance. An unlimited desired dimension is valid only
+when that envelope dimension is also unlimited. Required keys and matching
+periods are retained. Changing the envelope requires human-admin authority,
+a new canonical fingerprint, matching grant, and executor policy rebind.
+Dashboard blanks serialize as null, never zero; dashboard saves still disable
+autonomous mode and cannot create or expand authorization. Per-request model
+limits, connector timeouts/concurrency, and bounded retries are separate and
+remain finite. These configuration semantics do not imply aggregate periodic
+spend accounting is implemented by the fleet planner/executor.
+
 ## Operator migration
 
 This migration changes authorization and managed services, so a worker must

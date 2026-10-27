@@ -38,7 +38,7 @@ def publish(path, document):
 def ticket_holds_seat(ticket, agent):
     """Protect the exact holder; unknown active ownership protects every seat."""
     holders = []
-    if ticket.get('status') in {'claimed', 'in_progress', 'reviewing'}:
+    if ticket.get('status') in {'claimed', 'in_progress', 'creating_report', 'reviewing'}:
         holders.append((ticket, ('claimed_by_agent_id', 'claimed_by', 'claimed_by_principal_id')))
     review = ticket.get('review_lease')
     if isinstance(review, Mapping) and review:
@@ -58,9 +58,9 @@ def ticket_holds_seat(ticket, agent):
 
 
 class LocalFleetObserver:
-    def __init__(self, templates, services, stored, bindings, recover=None):
+    def __init__(self, templates, services, stored, bindings, recover=None, confirm_ready=None):
         self.templates, self.services, self.stored, self.bindings = templates, services, stored, bindings
-        self.recover = recover
+        self.recover, self.confirm_ready = recover, confirm_ready
 
     def collect(self, active_boards, snapshots, memberships, now, providers, host):
         expiry = (now + timedelta(seconds=120)).isoformat()
@@ -95,11 +95,27 @@ class LocalFleetObserver:
             service = self.services.inspect(seat_id, template)
             principal_unique = principal_counts.get(template.principal_id) == 1
             known, busy = bool(active_boards) and principal_unique, False
+            restarting_stale = False
             for board in active_boards:
                 snapshot, membership = snapshots.get(board, {}), memberships.get(board, {})
+                if not isinstance(snapshot, Mapping) or not isinstance(membership, Mapping):
+                    known = False
+                    continue
                 agents, tickets = snapshot.get('agents'), snapshot.get('coordination_tickets', snapshot.get('tickets'))
                 members = membership.get('members')
+                omissions_valid = all(
+                    key not in snapshot or (isinstance(snapshot[key], Mapping)
+                        and all(type(value) is int and value >= 0 for value in snapshot[key].values())
+                        and snapshot[key].get('agents', 0) == 0
+                        and (snapshot[key].get('tickets', 0) == 0
+                             or snapshot.get('coordination_tickets_complete') is True))
+                    for key in ('omitted_counts', 'truncation_counts')
+                )
                 if (not isinstance(agents, list) or not isinstance(tickets, list) or not isinstance(members, list)
+                        or not omissions_valid
+                        or ('coordination_tickets_complete' in snapshot
+                            and snapshot['coordination_tickets_complete'] is not True)
+                        or any(not isinstance(row, Mapping) for row in [*agents, *tickets, *members])
                         or (snapshot.get('truncated') and snapshot.get('coordination_tickets_complete') is not True)
                         or membership.get('truncated') or membership.get('next_cursor')):
                     known = False
@@ -119,8 +135,12 @@ class LocalFleetObserver:
                 # identity/membership still authorizes restart; live leases below
                 # remain protected. Running processes require fresh activity.
                 activity_valid = fresh or (not service.running and seen is not None and seen <= now)
+                stale_restart = (agent.get('lifecycle_status') == 'stale'
+                                 and agent.get('lifecycle_reason') == 'inactivity_threshold'
+                                 and not service.running and service.identity_verified)
+                restarting_stale |= stale_restart
                 valid = (activity_valid and not (isinstance(ready, Mapping) and ready.get('reported') is True and ready.get('dispatch_ready') is not True)
-                         and agent.get('lifecycle_status') == 'active'
+                         and (agent.get('lifecycle_status') == 'active' or stale_restart)
                          and agent.get('role') == template.role
                          and member.get('role') == ('reviewer' if template.role == 'reviewer' else 'member')
                          and all(type(caps.get(k)) is type(v) and caps[k] == v for k,v in template.capabilities.items()))
@@ -129,8 +149,12 @@ class LocalFleetObserver:
                     continue
                 readiness['boards'][board]['seats'][seat_id] = {
                     'principal_id': template.principal_id, 'role': agent['role'],
-                    'membership_role': member['role'], 'lifecycle_status': 'active', 'capabilities': caps}
+                    'membership_role': member['role'], 'lifecycle_status': agent['lifecycle_status'], 'capabilities': caps}
+                if stale_restart:
+                    readiness['boards'][board]['seats'][seat_id]['lifecycle_reason'] = 'inactivity_threshold'
                 expiry_at = timestamp(agent.get('lease_expires_at'))
+                if agent.get('lease_expires_at') and expiry_at is None:
+                    known = False
                 busy |= agent.get('status') in {'busy', 'working'} or bool(expiry_at and expiry_at > now)
                 # Ticket projections differ between product versions. Any active lease
                 # not attributable to a holder conservatively protects every seat.
@@ -140,6 +164,32 @@ class LocalFleetObserver:
                         continue
                     if ticket_holds_seat(ticket, agent):
                         busy = True
+            if (
+                self.confirm_ready is not None and known and not restarting_stale
+                and binding_valid and board_id in active_boards
+                and service.running and service.ready and service.identity_verified
+                and service.process_ref and previous.get('reactivation_attempts', 0)
+                and previous.get('process_ref') == service.process_ref
+                and previous.get('template_digest') == template.digest_sha256
+                and type(previous.get('generation')) is int
+            ):
+                confirmed = self.confirm_ready(
+                    seat_id, expected_generation=previous['generation'],
+                    expected_process_ref=service.process_ref, template_digest=template.digest_sha256,
+                )
+                if confirmed is not None:
+                    previous = confirmed
+            exhausted = previous.get('reactivation_exhausted') is True
+            if restarting_stale:
+                if not known or busy:
+                    known = False
+                    for board in active_boards:
+                        readiness['boards'][board]['seats'].pop(seat_id, None)
+                else:
+                    for board in active_boards:
+                        record = readiness['boards'][board]['seats'][seat_id]
+                        if record['lifecycle_status'] == 'stale':
+                            record['restart_eligible'] = True
             if known:
                 for board in active_boards:
                     leases['boards'][board]['seats'][seat_id] = {'stale_after': expiry, 'work': busy, 'review': busy}
@@ -177,15 +227,30 @@ class LocalFleetObserver:
                 reason_code = 'registry_authorization_unverified'
             if prior_active and not service.identity_verified:
                 reason_code = 'service_identity_unverified'
+            if previous.get('reactivation_attempts', 0) and not service.running and (not known or busy):
+                lifecycle = 'unhealthy'
+                reason_code = 'registry_reactivation_lease_unverified'
+                for board in active_boards:
+                    readiness['boards'][board]['seats'].pop(seat_id, None)
+            if exhausted and not service.running:
+                lifecycle = 'unhealthy'
+                reason_code = 'registry_reactivation_exhausted'
+                for board in active_boards:
+                    readiness['boards'][board]['seats'].pop(seat_id, None)
             if not principal_unique:
                 reason_code = 'duplicate_template_principal'
             if board_id not in active_boards:
                 raise ValueError('template binding targets an inactive board')
+            process_absent_verified = (
+                prior_active and not service.running and service.identity_verified
+                and isinstance(previous.get('process_ref'), str) and bool(previous.get('process_ref'))
+            )
             row = {'seat_id': seat_id, 'board_id': board_id, 'role': template.role, 'provider': provider,
                 'template_id': template_id, 'template_digest_sha256': template.digest_sha256,
                 'generation': previous.get('generation', 1), 'lifecycle': lifecycle,
                 'transition_at': datetime.fromtimestamp(previous.get('last_mutation', now.timestamp()), timezone.utc).isoformat(),
-                'managed': enabled if binding_valid and principal_unique else False}
+                'managed': enabled if binding_valid and principal_unique else False,
+                'process_absent_verified': process_absent_verified}
             if isinstance(previous.get('last_failure'), (int, float)):
                 row['last_failure_at'] = datetime.fromtimestamp(
                     previous['last_failure'], timezone.utc).isoformat()

@@ -268,6 +268,7 @@ def parse_registry(result: Any) -> dict[str, Any]:
         "delivery_policy",
         "delivery_policy_group",
         "delivery_policy_activation",
+        "final_validation_delivery",
         "domain",
     }
     for name, raw in projects.items():
@@ -349,6 +350,14 @@ def parse_registry(result: Any) -> dict[str, Any]:
                 normalized["projects"][name]["delivery_policy_group"] = delivery_group_name(raw["delivery_policy_group"])
             except ValueError as exc:
                 raise DoctorError(str(exc)) from exc
+        if "final_validation_delivery" in raw:
+            mode = raw["final_validation_delivery"]
+            if type(mode) is not str or mode not in {"require_pass", "draft_with_report"}:
+                raise DoctorError(
+                    f"project {name!r} final_validation_delivery must be require_pass or draft_with_report"
+                )
+            if mode != "require_pass":
+                normalized["projects"][name]["final_validation_delivery"] = mode
         if "delivery_policy_activation" in raw:
             try:
                 normalized["projects"][name]["delivery_policy_activation"] = parse_delivery_policy_activation(

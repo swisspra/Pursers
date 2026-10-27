@@ -1587,6 +1587,15 @@ class BoardClient:
         self._remember_event(result)
         return result
 
+    async def ticket_unclaim(self, ticket_id: str) -> dict[str, Any]:
+        """Release this worker's held pre-submission lease."""
+        result = await self._call(
+            "ticket_unclaim",
+            {"agent_name": self.agent_name, "ticket_id": ticket_id},
+        )
+        self._remember_event(result)
+        return result
+
     async def ticket_review_release(
         self, ticket_id: str, *, reason: str | None = None
     ) -> dict[str, Any]:
@@ -1621,6 +1630,7 @@ class BoardClient:
         view: str | None = None,
         include_dispatch_history: bool = False,
         cursor: str | None = None,
+        max_bytes: int | None = None,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
@@ -1635,12 +1645,15 @@ class BoardClient:
             arguments["assigned_to"] = assigned_to
         if ticket_ids is not None:
             arguments["ticket_ids"] = ticket_ids
-        if view is not None:
-            arguments["view"] = view
+        # Internal SDK consumers need operational fields; model-facing Central
+        # and relay lists default to summary independently of this contract.
+        arguments["view"] = view if view is not None else "work"
         if include_dispatch_history:
             arguments["include_dispatch_history"] = True
         if cursor is not None:
             arguments["cursor"] = cursor
+        if max_bytes is not None:
+            arguments["max_bytes"] = max_bytes
         return await self._call("ticket_list", arguments)
 
     async def ticket_history_list(

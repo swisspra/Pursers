@@ -77,6 +77,26 @@ def test_codex_event_uses_model_and_only_runs_after_offer(tmp_path,monkeypatch):
     assert 'board_id home' in command[-1]
 
 
+@pytest.mark.parametrize('role,expected', [
+    ('reviewer', 'Report scoped ticket acceptance separately from final whole-project QA'),
+    ('worker', 'Confirm the resulting Central ticket state before exiting'),
+])
+def test_event_prompt_carries_scoped_review_context_only_for_reviewers(tmp_path, role, expected):
+    cfg=config(tmp_path);cfg['role']=role;cfg['max_runs_per_hour']=None
+    runner=api()['EventSeatRunner'](cfg);prompts=[]
+    runner.run_command=lambda argv,**kwargs:prompts.append(argv[-1])
+    runner.process({'new_seq':{'home':42},'events':[{
+        'kind':'review_offered' if role=='reviewer' else 'ticket_offered',
+        'board_id':'home','ticket_id':'TK-one','id':'one'}]},100)
+    assert len(prompts)==1 and expected in prompts[0]
+    if role=='reviewer':
+        for cue in ('unchanged unrelated baseline failure is not a new regression',
+                    'configured final gate', 'never fabricate evidence'):
+            assert cue in prompts[0]
+    else:
+        assert 'scoped ticket acceptance separately from final whole-project QA' not in prompts[0]
+
+
 def test_event_environment_preserves_configured_identity_capabilities(tmp_path,monkeypatch):
     monkeypatch.setenv('PURSERS_HOST','zed')
     worker_config=codex_config(tmp_path);worker_config['skills']=['python','docs','python']
@@ -724,3 +744,58 @@ def test_chained_httpcore_timeouts_retry_without_hiding_mixed_failures():
     assert classify(grouped) is True
     assert classify(ExceptionGroup('mixed', [wrapped, ValueError('invalid response')])) is False
     assert classify(ExceptionGroup('auth', [wrapped, RuntimeError('HTTP 401 Unauthorized')])) is False
+
+
+@pytest.mark.parametrize("role", ["worker", "reviewer"])
+def test_queued_recovery_rechecks_live_ownership_before_model(tmp_path, role):
+    cfg=config(tmp_path);cfg["role"]=role
+    runner=api()["EventSeatRunner"](cfg);runner.preflight_enabled=True
+    runner.state["cursor"]={"home":42}
+    runner.state["pending"]=[{"board":"home","ticket":"TK-closed","recovery_key":"old-claim",
+                              "marker":["home","TK-closed","old-claim","owned_recovery"]}]
+    async def stale(event, now):return False,"stale_owned_recovery"
+    runner.event_authorized=stale
+    runner.run_command=lambda *_args:pytest.fail("completed recovery must not launch a model")
+    runner.process({"new_seq":{"home":43},"events":[]},100)
+    assert runner.state["pending"]==[] and runner.state["runs"]==[]
+    assert runner.state["cursor"]=={"home":43}
+    assert runner.state["owned_recoveries"]=={}
+
+
+@pytest.mark.parametrize('role', ['worker', 'reviewer'])
+@pytest.mark.parametrize('change', ['closed', 'foreign', 'expired', 'new_claim', 'reoffered', 'unchanged'])
+def test_recovery_authorization_requires_same_live_claim(tmp_path, role, change):
+    import asyncio
+    from types import SimpleNamespace
+    cfg=config(tmp_path);cfg['role']=role
+    runner=api()['EventSeatRunner'](cfg)
+    identity=SimpleNamespace(agent_name='worker-a',role=role,agent_id='AI-own',principal_id='PR-own')
+    ticket={'ticket_id':'TK-one','status':'claimed' if role=='worker' else 'submitted',
+        'claimed_by_agent_id':'AI-own','claimed_by_principal_id':'PR-own',
+        'lease_expires_at_epoch':200,'claimed_at':'claim-one',
+        'review_lease':{'reviewer_agent_id':'AI-own','reviewer_principal_id':'PR-own',
+                        'expires_at_epoch':200,'claimed_at':'claim-one'}}
+    key=runner.owned_key('home',ticket,identity,100)
+    if change=='closed':ticket['status']='closed'
+    elif change=='foreign':
+        ticket['claimed_by_principal_id']='PR-other'
+        ticket['review_lease']['reviewer_principal_id']='PR-other'
+    elif change=='expired':
+        ticket['lease_expires_at_epoch']=99
+        ticket['review_lease']['expires_at_epoch']=99
+    elif change=='new_claim':
+        ticket['claimed_at']='claim-two';ticket['review_lease']['claimed_at']='claim-two'
+    elif change=='reoffered':
+        ticket['status']='open' if role=='worker' else 'submitted'
+        ticket.pop('claimed_by_agent_id');ticket.pop('review_lease')
+        ticket['dispatch_state']={'state':'broadcast','kind':'work' if role=='worker' else 'review'}
+    class Client:
+        def __init__(self):self.identity=identity
+        async def __aenter__(self):return self
+        async def __aexit__(self,*args):pass
+        async def ticket_get(self,*args,**kwargs):return {'ticket':ticket}
+        async def ticket_claim(self,*args):pytest.fail('recovery cannot acquire another claim')
+        async def ticket_review_claim(self,*args):pytest.fail('recovery cannot acquire another review')
+    runner.client=lambda _board:Client()
+    expected=(True,'owned_lease') if change=='unchanged' else (False,'stale_owned_recovery')
+    assert asyncio.run(runner.event_authorized({'board':'home','ticket':'TK-one','recovery_key':key},100))==expected

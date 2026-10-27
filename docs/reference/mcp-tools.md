@@ -58,15 +58,15 @@ Response fields: `ok, board_id, agent_id, agent_name, profile, principal_id, rol
 
 ### `board_snapshot`
 
-Return a bounded cold projection and exact journal splice watermark. ``limit`` caps each projected collection. ``max_bytes`` caps the UTF-8 JSON payload; explicit counts report every omitted entry.
+Return a bounded cold projection and exact journal splice watermark. ``limit`` caps each projected collection. ``max_bytes`` caps the UTF-8 JSON payload; explicit counts report every omitted entry. A truncated snapshot is an overview. Use cursor-paged ``ticket_list`` and ``ticket_get(view="full")`` for the remaining ticket evidence.
 
 Required authorization: `board:read`.
 
 | Argument | Type | Presence | Default |
 |---|---|---|---|
 | `board_id` | `string` | required | — |
-| `limit` | `integer` | optional | `100` |
-| `max_bytes` | `integer` | optional | `300000` |
+| `limit` | `integer` | optional | `10` |
+| `max_bytes` | `integer` | optional | `16384` |
 | `include_retired` | `boolean` | optional | `false` |
 
 Response fields: `ok, board, agents, tickets, memories, latest_seq, total_counts, returned_counts, omitted_counts, truncated`.
@@ -463,7 +463,7 @@ Response fields: `ok, board_id, agent_id, tickets, count, total_matching, trunca
 
 ### `ticket_list`
 
-List authorized tickets with bounded server-side filters. Terminal closed/canceled tickets that aged into the archive tier stay visible through the compact hot-document index; their full bodies are read through from the archive for the returned page only. ``include_archived=False`` restricts results to the hot document.
+List authorized tickets with bounded server-side filters. Terminal closed/canceled tickets that aged into the archive tier stay visible through the compact hot-document index; their full bodies are read through from the archive for the returned page only. ``include_archived=False`` restricts results to the hot document. Defaults to ten summaries. Follow ``next_cursor`` with the same filters and view for more; use ``ticket_get(view="full")`` for one exact ticket and ``ticket_history_list`` to page its retained evidence. Summary pages default to 32 KiB; explicit work/full pages retain the existing 192 KiB bound. ``max_bytes`` adjusts a page without cutting text.
 
 Required authorization: `board:read`; server-side visibility filters still apply.
 
@@ -474,15 +474,16 @@ Required authorization: `board:read`; server-side visibility filters still apply
 | `assigned_to` | `string | null` | optional | `null` |
 | `include_closed` | `boolean` | optional | `false` |
 | `include_archived` | `boolean` | optional | `true` |
-| `limit` | `integer` | optional | `100` |
+| `limit` | `integer` | optional | `10` |
 | `agent_name` | `string | null` | optional | `null` |
 | `review_unclaimed_only` | `boolean` | optional | `false` |
 | `ticket_ids` | `array[string] | null` | optional | `null` |
-| `view` | `string` | optional | `"work"` |
+| `view` | `string` | optional | `"summary"` |
 | `include_dispatch_history` | `boolean` | optional | `false` |
 | `cursor` | `string | null` | optional | `null` |
+| `max_bytes` | `integer | null` | optional | `null` |
 
-Response fields: `ok, tickets, count, returned_count, total_matching, archived_matching, next_cursor, has_more, read_consistency, watermark, response_max_bytes, response_bytes_estimate, archive_hydrated_count, filters, latest_seq`.
+Response fields: `ok, tickets, view, include_dispatch_history, count, returned_count, total_matching, archived_matching, next_cursor, has_more, read_consistency, watermark, response_max_bytes, response_bytes_estimate, archive_hydrated_count, filters, latest_seq`.
 
 ### `ticket_history_list`
 

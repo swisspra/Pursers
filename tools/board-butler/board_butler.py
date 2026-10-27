@@ -85,6 +85,26 @@ _CONFIGURATION_CONTRACT_API = runpy.run_path(
 ConfigurationContract = _CONFIGURATION_CONTRACT_API["ConfigurationContract"]
 build_configuration_contract = _CONFIGURATION_CONTRACT_API["build_contract"]
 read_private_configuration = _CONFIGURATION_CONTRACT_API["read_private_json"]
+_TECHNICAL_RECOVERY_SPEC = importlib.util.spec_from_file_location(
+    "board_butler_technical_recovery", Path(__file__).with_name("technical_recovery.py")
+)
+if _TECHNICAL_RECOVERY_SPEC is None or _TECHNICAL_RECOVERY_SPEC.loader is None:
+    raise RuntimeError("technical recovery policy module is unavailable")
+_TECHNICAL_RECOVERY_MODULE = importlib.util.module_from_spec(_TECHNICAL_RECOVERY_SPEC)
+sys.modules.setdefault(_TECHNICAL_RECOVERY_SPEC.name, _TECHNICAL_RECOVERY_MODULE)
+_TECHNICAL_RECOVERY_SPEC.loader.exec_module(_TECHNICAL_RECOVERY_MODULE)
+TechnicalRecoverySupervisor = _TECHNICAL_RECOVERY_MODULE.TechnicalRecoverySupervisor
+
+def acting_registry_boards(
+    args: argparse.Namespace, active_boards: set[str]
+) -> set[str]:
+    """Select only active registry boards under explicit active authorization."""
+    if getattr(args, "runtime_mode", "shadow") != "active":
+        return set()
+    if getattr(args, "act_on_registry", False):
+        return set(active_boards)
+    return set(args.act_on_board) & active_boards
+
 
 STATE_KEY = "coordinator_findings"
 SUBSCRIPTION_HEALTH_KEY = "board_butler_subscription_health"
@@ -795,6 +815,7 @@ class FleetSeat:
     managed: bool = True
     last_failure_at: datetime | None = None
     reason_code: str | None = None
+    process_absent_verified: bool = False
 
     def __post_init__(self) -> None:
         if self.role not in FLEET_ROLES or self.lifecycle not in FLEET_LIFECYCLES:
@@ -810,15 +831,26 @@ class FleetSeat:
             raise ValueError("fleet seat reason code is invalid")
         if not re.fullmatch(r"[0-9a-f]{64}", self.template_digest_sha256):
             raise ValueError("fleet seat template digest is invalid")
+        if not isinstance(self.process_absent_verified, bool):
+            raise ValueError("fleet seat process observation is invalid")
+
+    @property
+    def process_known_absent(self) -> bool:
+        """A trusted service adapter proved this exact process incarnation is gone."""
+        return self.process_absent_verified
 
     @property
     def active(self) -> bool:
-        return self.lifecycle in {"starting", "ready", "busy", "draining", "unhealthy"}
+        # Unhealthy/absent seats still reserve the configured host and provider
+        # ceiling until canonical lease release and CAS reconciliation complete.
+        return self.process_known_absent or self.lifecycle in {
+            "starting", "ready", "busy", "draining", "unhealthy"
+        }
 
     @property
     def serving(self) -> bool:
-        """Usable running capacity; uncertain processes still count against caps."""
-        return self.active and (
+        """Only a viable incarnation satisfies productive capacity."""
+        return self.active and not self.process_known_absent and self.lifecycle != "unhealthy" and (
             self.live_lease or self.busy
             or self.lifecycle in {"starting", "ready", "busy"}
         )
@@ -1773,6 +1805,64 @@ def fleet_policies_from_config(
     return host_policy, policies
 
 
+def fleet_projection_error(snapshot: Any) -> str | None:
+    """Validate product evidence before any fleet mutation or local recovery."""
+    if not isinstance(snapshot, Mapping):
+        return "snapshot_missing"
+    for key in ("omitted_counts", "truncation_counts"):
+        if key not in snapshot:
+            continue
+        counts = snapshot[key]
+        if not isinstance(counts, Mapping) or any(
+            type(value) is not int or value < 0 for value in counts.values()
+        ):
+            return "omission_metadata_invalid"
+        if counts.get("agents", 0):
+            return "agents_omitted"
+        if counts.get("tickets", 0) and snapshot.get("coordination_tickets_complete") is not True:
+            return "tickets_omitted"
+    if "truncated" in snapshot and type(snapshot["truncated"]) is not bool:
+        return "truncation_invalid"
+    if "coordination_tickets_complete" in snapshot and snapshot["coordination_tickets_complete"] is not True:
+        return "tickets_incomplete"
+    if snapshot.get("coordination_tickets_complete") is True and "coordination_tickets" not in snapshot:
+        return "tickets_missing"
+    if snapshot.get("truncated") and snapshot.get("coordination_tickets_complete") is not True:
+        return "tickets_incomplete"
+    agents = snapshot.get("agents")
+    rows = snapshot.get("coordination_tickets", snapshot.get("tickets"))
+    if not isinstance(agents, list) or any(not isinstance(row, Mapping) for row in agents):
+        return "agents_invalid"
+    for field in ("agent_id", "agent_name"):
+        identities = [row[field] for row in agents if field in row]
+        if any(not isinstance(value, str) or not value for value in identities) or len(set(identities)) != len(identities):
+            return "agent_identity_invalid"
+    if not isinstance(rows, list):
+        return "tickets_missing"
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            return "ticket_invalid"
+        identity = row.get("ticket_id")
+        if not isinstance(identity, str) or not identity or identity in seen:
+            return "ticket_identity_invalid"
+        seen.add(identity)
+        if row.get("oversized_for_list") is not None and row["oversized_for_list"] is not False:
+            return "ticket_stub"
+        if "omitted_sections" in row and row["omitted_sections"] != []:
+            return "ticket_sections_omitted"
+        if not isinstance(row.get("status"), str) or row["status"] not in {"open", "claimed", "in_progress", "creating_report",
+                "submitted", "reviewing", "in_review", "needs_human", "closed", "rejected", "canceled", "terminated"}:
+            return "ticket_status_invalid"
+        if row.get("status") == "open" and (
+            type(row.get("tier")) is not int or row["tier"] not in {1, 2, 3}
+        ):
+            return "ticket_tier_invalid"
+        if "tags" in row and (not isinstance(row["tags"], list) or any(not isinstance(tag, str) for tag in row["tags"])):
+            return "ticket_tags_invalid"
+    return None
+
+
 def registry_fleet_snapshots(board_snapshots, configured_boards, home_board):
     """Include registry project demand in the shared home fleet exactly once."""
     selected = {board: board_snapshots[board] for board in configured_boards}
@@ -1783,7 +1873,8 @@ def registry_fleet_snapshots(board_snapshots, configured_boards, home_board):
     for board in pooled:
         snapshot = board_snapshots[board]
         rows = snapshot.get("coordination_tickets", snapshot.get("tickets"))
-        if (not isinstance(rows, list) or not isinstance(snapshot.get("agents"), list)
+        if (snapshot.get("coordination_tickets_complete") is False
+                or not isinstance(rows, list) or not isinstance(snapshot.get("agents"), list)
                 or (snapshot.get("truncated") and snapshot.get("coordination_tickets_complete") is not True)):
             raise ValueError(f"{board}: registry fleet demand is incomplete")
         tickets.extend(
@@ -1816,6 +1907,8 @@ def fleet_snapshot_from_products(
     agent_indexes: dict[str, dict[str, Mapping[str, Any]]] = {}
     for board_id in sorted(board_snapshots):
         board = board_snapshots[board_id]
+        if board.get("coordination_tickets_complete") is False:
+            raise ValueError(f"{board_id}: ticket snapshot is incomplete")
         if board.get("truncated") is True and board.get("coordination_tickets_complete") is not True:
             raise ValueError(f"{board_id}: ticket snapshot is incomplete")
         rows = board.get("coordination_tickets", board.get("tickets"))
@@ -2016,6 +2109,7 @@ def fleet_snapshot_from_products(
                 managed=row["managed"],
                 last_failure_at=last_failure_at,
                 reason_code=row.get("reason_code"),
+                process_absent_verified=row.get("process_absent_verified", False) is True,
             )
         )
     load_ratio = host_observation.get("load_ratio")
@@ -2295,10 +2389,13 @@ class FleetReconciler:
             for role in FLEET_ROLES:
                 role_policy = policy.roles[role]
                 idle_since = _fleet_role_idle_time(board_prior, role)
+                # A lease on a verified absent process reserves caps and is
+                # protected from mutation, but cannot satisfy productive demand.
                 live = sum(
                     1
                     for seat in seats
                     if seat.managed and seat.role == role and seat.live_lease
+                    and not seat.process_known_absent
                 )
                 pressure = _role_pressure(demand, role)
                 available = sum(
@@ -3122,6 +3219,28 @@ class FleetReconciler:
         }
 
 
+def _approval_error_metadata(exc: Exception) -> tuple[str, str | None]:
+    """Export only a safe exception class and validated registry routing code."""
+    name = getattr(exc, "original_error_class", None) or type(exc).__name__
+    if not isinstance(name, str) or re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", name) is None:
+        name = "ApprovalError"
+    code = (getattr(exc, "original_error_code", None) or getattr(exc, "code", None)) if name == "RegistryRoutingError" else None
+    if not isinstance(code, str) or re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code) is None:
+        code = None
+    return name, code
+
+
+@dataclass(frozen=True)
+class ApprovalRepositoryBinding:
+    """One ticket's registered repository and pinned local main, never a board fallback."""
+
+    repo: Path | None
+    main_sha: str | None
+    identity: str
+    error_class: str | None = None
+    error_code: str | None = None
+
+
 @dataclass(frozen=True)
 class ObservationContext:
     """One bounded, board-owned input shared by every observer."""
@@ -3138,6 +3257,7 @@ class ObservationContext:
     main_ref: str | None = None
     questions_complete: bool = True
     tickets_complete: bool = True
+    approval_repositories: Mapping[str, ApprovalRepositoryBinding] | None = None
 
 
 @dataclass(frozen=True)
@@ -3155,6 +3275,7 @@ class ApprovalClassification:
 
     result: Any | None = None
     error_class: str | None = None
+    error_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -3174,10 +3295,11 @@ class ApprovalScanOutcome:
 class ApprovalClassificationCache:
     """Carry approval classifications across refreshes with bounded work."""
 
-    cache: dict[tuple[str, str, str], ApprovalClassification] = field(
+    cache: dict[tuple[str, str, str, str], ApprovalClassification] = field(
         default_factory=dict
     )
-    pending: deque[tuple[str, str, str]] = field(default_factory=deque)
+    pending: deque[tuple[str, str, str, str]] = field(default_factory=deque)
+    expires_at: dict[tuple[str, str, str, str], float] = field(default_factory=dict)
 
     def scan(
         self,
@@ -3191,19 +3313,34 @@ class ApprovalClassificationCache:
             raise ValueError("approval scan budget must be positive")
         classifier = classify or _stranded_approvals_api()["classify_approval"]
         parser = _stranded_approvals_api()["parse_approved_reference"]
-        desired: dict[str, tuple[tuple[str, str, str], Mapping[str, Any]]] = {}
+        desired: dict[str, tuple[tuple[str, str, str, str], Mapping[str, Any]]] = {}
+        bindings: dict[str, ApprovalRepositoryBinding] = {}
         for ticket_id, ticket in sorted(context.tickets.items()):
             if ticket.get("review_verdict") != "approve" or ticket.get("status") != "closed":
                 continue
             reference = parser(ticket)
             approved_sha = reference[1] if reference is not None else "-"
-            key = (ticket_id, approved_sha, main_sha)
+            if context.approval_repositories is None:
+                binding = ApprovalRepositoryBinding(
+                    context.repo, main_sha,
+                    str(context.repo.resolve()) if context.repo is not None else "-",
+                )
+            else:
+                binding = context.approval_repositories.get(ticket_id) or ApprovalRepositoryBinding(
+                    None, None, "unavailable", "ApprovalRepositoryUnavailable"
+                )
+            bindings[ticket_id] = binding
+            key_main_sha = main_sha if context.approval_repositories is None else binding.main_sha or "-"
+            key = (ticket_id, approved_sha, key_main_sha, binding.identity)
             desired[ticket_id] = (key, ticket)
 
         desired_keys = {key for key, _ticket in desired.values()}
+        scan_time = time.monotonic()
         self.cache = {
-            key: value for key, value in self.cache.items() if key in desired_keys
+            key: value for key, value in self.cache.items()
+            if key in desired_keys and self.expires_at.get(key, 0) > scan_time
         }
+        self.expires_at = {key: expiry for key, expiry in self.expires_at.items() if key in self.cache}
         queued = {
             key
             for key in self.pending
@@ -3227,17 +3364,26 @@ class ApprovalClassificationCache:
             ticket = tickets_by_key.get(key)
             if ticket is None or key in self.cache:
                 continue
-            try:
-                result = classifier(
-                    ticket,
-                    repo=context.repo,
-                    main_ref=context.main_ref,
-                )
-            except Exception as exc:
-                value = ApprovalClassification(error_class=type(exc).__name__)
+            binding = bindings[str(ticket["ticket_id"])]
+            if binding.error_class is not None:
+                value = ApprovalClassification(error_class=binding.error_class, error_code=binding.error_code)
             else:
-                value = ApprovalClassification(result=result)
+                try:
+                    result = classifier(
+                        ticket,
+                        repo=binding.repo,
+                        main_ref=binding.main_sha,
+                    )
+                except Exception as exc:
+                    error_class, error_code = _approval_error_metadata(exc)
+                    value = ApprovalClassification(error_class=error_class, error_code=error_code)
+                else:
+                    value = ApprovalClassification(result=result)
             self.cache[key] = value
+            # Local object availability can change without path/main changes.
+            # Revalidation shares the same FIFO and budget as first classifications.
+            transient = value.error_class is not None or getattr(value.result, "state", None) in {"BRANCH_MISSING", "UNVERIFIABLE"}
+            self.expires_at[key] = time.monotonic() + (30 if transient else 300)
             classified += 1
 
         classifications = {
@@ -3499,6 +3645,11 @@ def _provider_request_body(
         "evidence": finding.get("evidence"),
         "fallback_draft": finding.get("message"),
     }
+    # Bound both provider protocols before any paid I/O. Keep Unicode literal
+    # inside the model's JSON text instead of feeding it escaped code points.
+    prompt_bytes = _canonical_json_bytes(inputs)
+    if len(prompt_bytes) > MAX_PROVIDER_PROMPT_CHARS:
+        raise ValueError("provider prompt exceeded the safe bound")
     if runtime.draft_protocol == "pursers_json_v1":
         document = {
             "protocol": runtime.draft_protocol,
@@ -3507,9 +3658,7 @@ def _provider_request_body(
             "max_output_chars": MAX_PROVIDER_DRAFT_CHARS,
         }
     elif runtime.draft_protocol == "openai_chat_completions_v1":
-        prompt = json.dumps(inputs, sort_keys=True, separators=(",", ":"))
-        if len(prompt) > MAX_PROVIDER_PROMPT_CHARS:
-            raise ValueError("provider prompt exceeded the safe bound")
+        prompt = prompt_bytes.decode("utf-8")
         document = {
             "model": runtime.model,
             "messages": [
@@ -6626,7 +6775,11 @@ def source_intake_board_load(
 ) -> dict[str, int]:
     """Supply observed queue and idle capacity to the model without deciding pulls."""
     counts: dict[str, int] = {}
-    tickets = snapshot.get("tickets", [])
+    tickets = (
+        snapshot.get("coordination_tickets", [])
+        if snapshot.get("coordination_tickets_complete") is True
+        else snapshot.get("tickets", [])
+    )
     for ticket in tickets if isinstance(tickets, list) else []:
         status = ticket.get("status") if isinstance(ticket, Mapping) else None
         if isinstance(status, str) and status not in {"closed", "canceled"}:
@@ -6693,8 +6846,8 @@ async def decide_intake_with_provider(
     """Ask the configured Butler model how much external work to pull now."""
     if runtime.draft_protocol != "openai_chat_completions_v1":
         raise ValueError("intake decisions require openai_chat_completions_v1")
-    prompt = json.dumps(context, sort_keys=True, separators=(",", ":"))
-    if len(prompt) > MAX_PROVIDER_PROMPT_CHARS:
+    prompt = _canonical_json_bytes(context).decode("utf-8")
+    if len(prompt.encode("utf-8")) > MAX_PROVIDER_PROMPT_CHARS:
         raise ValueError("intake decision context exceeded the safe bound")
     body = json.dumps(
         {
@@ -6841,6 +6994,7 @@ class _ResidentBatchConnector:
         correlation, mutable = self._correlation(row.get('description'))
         return {
             'id': row.get('pullRequestId'), 'status': row.get('status'),
+            'is_draft': row.get('isDraft') is True,
             'source_branch': str(row.get('sourceRefName', '')).removeprefix('refs/heads/'),
             'target_branch': str(row.get('targetRefName', '')).removeprefix('refs/heads/'),
             'source_sha': row.get('lastMergeSourceCommit', {}).get('commitId'),
@@ -6900,15 +7054,47 @@ class _ResidentBatchConnector:
         return result
 
     async def create_customer_pr(self, repository, payload, body, operation_id):
-        del repository, operation_id
+        del repository
+        is_draft = payload.get('is_draft', False)
+        if type(is_draft) is not bool:
+            raise ConnectorDenied('customer PR draft intent must be explicit boolean')
+        if is_draft:
+            # Discover the live input contract immediately before draft creation;
+            # a cached connector catalog is not sufficient authorization.
+            import hashlib
+            discovery_id = hashlib.sha256((operation_id + ':draft-capability').encode()).hexdigest()
+            discovery = await self.runtime.discover(discovery_id)
+            declared = [tool for tool in discovery.tools
+                        if tool.get('name') == 'ado_pull_request_create']
+            schema = declared[0].get('input_schema') if len(declared) == 1 else None
+            prop = schema.get('properties', {}).get('isDraft') if isinstance(schema, Mapping) else None
+            if not isinstance(prop, Mapping) or prop.get('type') != 'boolean':
+                raise ConnectorDenied('draft PR creation is unsupported by the discovered connector schema')
         document = await self.poller._delivery_tool(self.runtime, 'ado_pull_request_create', {
             'project': self.fields['repository_project'],
             'repositoryId': self.fields['repository_name'],
             'sourceRefName': 'refs/heads/' + payload['source_branch'],
             'targetRefName': 'refs/heads/' + payload['target_branch'],
-            'title': 'Pursers reviewed delivery batch', 'description': body, 'isDraft': False,
+            'title': 'Pursers reviewed delivery batch', 'description': body, 'isDraft': is_draft,
         }, mutate=True)
-        return {'status': 'confirmed', 'pr': self._pr(self._verified_pr_row(document))}
+        created = self._pr(self._verified_pr_row(document))
+        if is_draft:
+            if (created.get('is_draft') is not True
+                    or created.get('source_branch') != payload.get('source_branch')
+                    or created.get('target_branch') != payload.get('target_branch')
+                    or created.get('correlation') != payload.get('correlation')):
+                raise ConnectorResultError('draft PR create response does not confirm its exact binding')
+            confirmed = await self.get_customer_pr('', created.get('id'))
+            if (confirmed.get('id') != created.get('id')
+                    or confirmed.get('is_draft') is not True
+                    or confirmed.get('status') != 'active'
+                    or confirmed.get('source_branch') != payload.get('source_branch')
+                    or confirmed.get('source_sha') != payload.get('snapshot_sha')
+                    or confirmed.get('target_branch') != payload.get('target_branch')
+                    or confirmed.get('correlation') != payload.get('correlation')):
+                raise ConnectorResultError('draft PR readback does not confirm its exact binding')
+            created = confirmed
+        return {'status': 'confirmed', 'pr': created}
 
     async def update_customer_pr(self, repository, payload, body, operation_id):
         del repository, operation_id
@@ -6933,9 +7119,13 @@ class _ResidentBatchConnector:
     async def reconcile_operation(self, repository, reservation):
         payload = reservation.get('payload', {})
         kind = reservation.get('kind')
-        if kind == 'create_customer_pr':
+        if kind in {'create_customer_pr', 'create_draft_customer_pr'}:
             rows = await self.list_customer_prs(repository, payload['target_branch'], 'active')
-            matches = [row for row in rows if row.get('correlation') == payload['correlation']]
+            matches = [row for row in rows if row.get('correlation') == payload['correlation']
+                       and row.get('source_branch') == payload.get('source_branch')
+                       and row.get('source_sha') == payload.get('snapshot_sha')
+                       and row.get('target_branch') == payload.get('target_branch')
+                       and row.get('is_draft') is (kind == 'create_draft_customer_pr')]
             return {'status': 'confirmed', 'pr': matches[0]} if len(matches) == 1 else {'status': 'unknown'}
         if kind == 'update_customer_pr':
             pr = await self.get_customer_pr(repository, payload['pr_id'])
@@ -6976,6 +7166,10 @@ class SourceIntakePoller:
         self.sources = tuple(source for source in sources if source.enabled)
         self.group_choose = None
         self.group_scope = None
+        # Active sealed project workflows own native delivery. The backend
+        # supplies a registry-bound predicate so legacy intake writeback can
+        # be deferred without changing behavior for unconfigured projects.
+        self.workflow_owned = None
         self._group_retry_after: dict[str, datetime] = {}
         if not 1 <= per_source_cap <= SOURCE_INTAKE_MAX_ITEMS_PER_SOURCE:
             raise ConnectorConfigError("source per-cycle cap is invalid")
@@ -7204,6 +7398,17 @@ class SourceIntakePoller:
             return False
         if not _ticket_approved(ticket) or ticket.get("status") != "closed":
             return False
+        # A sealed, active native project workflow owns cohort preparation and
+        # the single final-QA publication gate. Do not let this per-ticket
+        # legacy connector path race ahead of that QA; return to its prior
+        # behavior whenever the project has no active native workflow.
+        if getattr(self, "workflow_owned", None) is not None:
+            try:
+                if await self.workflow_owned(board_id, ticket):
+                    return False
+            except Exception as exc:
+                # Uncertainty must fail closed for source-owned writes.
+                raise ConnectorDenied("native workflow ownership is unavailable") from exc
         marker_digest = hashlib.sha256(
             (
                 f"{source.source_id}\0{item['external_id']}\0"
@@ -7532,6 +7737,26 @@ class SourceIntakePoller:
             ticket = await self.ticket_reader(board_id, ticket_id)
             if ticket is None:
                 continue
+            if getattr(self, "workflow_owned", None) is not None:
+                try:
+                    if await self.workflow_owned(board_id, ticket):
+                        findings.append({
+                            "kind": "source-intake-delivery-native-workflow-pending",
+                            "level": "info",
+                            "ticket_id": ticket_id,
+                            "message": "Native cohort QA/publication owns delivery; legacy per-ticket writeback is deferred.",
+                        })
+                        continue
+                except Exception as exc:
+                    findings.append({
+                        "kind": "source-intake-delivery-native-workflow-uncertain",
+                        "level": "warn",
+                        "status": "needs_operator",
+                        "ticket_id": ticket_id,
+                        "error_class": type(exc).__name__,
+                        "message": "Native workflow ownership is uncertain; legacy writeback remains blocked.",
+                    })
+                    continue
             status = ticket.get("status")
             if status == "canceled" or (status == "closed" and not _ticket_approved(ticket)):
                 self.index.set_status(key, "closed")
@@ -11101,6 +11326,45 @@ def _local_main_revision(repo: Path) -> tuple[str, str] | None:
     return None
 
 
+def _approval_repository_binding(
+    registry: Mapping[str, Any], board_id: str, ticket: Mapping[str, Any]
+) -> ApprovalRepositoryBinding:
+    from pursers_client.project_registry import RegistryRoutingError, resolve_registry_target
+
+    try:
+        target = ticket.get("target_url")
+        if not isinstance(target, str) or not target:
+            # A project name is usable only if it is an exact registered name;
+            # legacy board IDs must never choose one of several project repos.
+            project = ticket.get("project")
+            projects = registry.get("projects", {})
+            if not isinstance(project, str) or project not in projects:
+                raise ValueError("ticket has no registered project target")
+            target = project + "/"
+        route = resolve_registry_target(dict(registry), board_id, target)
+        stored_project = ticket.get("project")
+        if isinstance(stored_project, str) and stored_project in registry["projects"] and stored_project != route["project"]:
+            raise RegistryRoutingError("ticket_project_route_mismatch", "stored ticket project conflicts with target route")
+        repo = Path(str(route["work_dir"]))
+        if not repo.is_absolute():
+            raise ValueError("registered repository path is not absolute")
+        repo = repo.resolve()
+        identity = json.dumps(
+            [route["project"], str(repo), registry["projects"][route["project"]].get("repository_url")],
+            separators=(",", ":"),
+        )
+        revision = _local_main_revision(repo)
+        if revision is None:
+            return ApprovalRepositoryBinding(repo, None, identity, "ApprovalRepositoryUnavailable")
+        return ApprovalRepositoryBinding(repo, revision[1], identity)
+    except RegistryRoutingError as exc:
+        error_class, error_code = _approval_error_metadata(exc)
+        return ApprovalRepositoryBinding(None, None, "unresolved", error_class, error_code)
+    except (KeyError, TypeError, ValueError, OSError) as exc:
+        error_class, error_code = _approval_error_metadata(exc)
+        return ApprovalRepositoryBinding(None, None, "unresolved", error_class, error_code)
+
+
 def approval_scan_coverage_finding(
     board_id: str,
     now: datetime,
@@ -11601,7 +11865,12 @@ def _render_stranded_approvals(
                     "level": "warn",
                     "ticket_id": ticket_id,
                     "message": "Approved-ticket landing could not be verified from the local repository.",
-                    "evidence": f"state=UNVERIFIABLE; error={classification.error_class}",
+                    "error_class": classification.error_class,
+                    "routing_code": classification.error_code,
+                    "evidence": (
+                        f"state=UNVERIFIABLE; error={classification.error_class}"
+                        + (f"; code={classification.error_code}" if classification.error_code else "")
+                    ),
                     "next_action": "Coordinator: refresh the read-only repository refs and rerun the ancestry audit.",
                     **_escalation_fields(False, "verification must be complete before declaring a ticket landed"),
                 })
@@ -11669,18 +11938,30 @@ def _render_stranded_approvals(
 def _observe_stranded_approvals(
     context: ObservationContext,
 ) -> list[Mapping[str, Any]]:
-    if context.repo is None or not context.main_ref:
+    if context.approval_repositories is None and (context.repo is None or not context.main_ref):
         return []
     classify = _stranded_approvals_api()["classify_approval"]
     classifications: dict[str, ApprovalClassification] = {}
     for ticket_id, ticket in sorted(context.tickets.items()):
         if ticket.get("review_verdict") != "approve" or ticket.get("status") != "closed":
             continue
-        try:
-            result = classify(ticket, repo=context.repo, main_ref=context.main_ref)
-        except Exception as exc:
+        binding = (
+            context.approval_repositories.get(ticket_id)
+            if context.approval_repositories is not None
+            else ApprovalRepositoryBinding(context.repo, context.main_ref, "direct")
+        )
+        if binding is None or binding.error_class is not None:
             classifications[ticket_id] = ApprovalClassification(
-                error_class=type(exc).__name__
+                error_class=binding.error_class if binding is not None else "ApprovalRepositoryUnavailable",
+                error_code=binding.error_code if binding is not None else None,
+            )
+            continue
+        try:
+            result = classify(ticket, repo=binding.repo, main_ref=binding.main_sha)
+        except Exception as exc:
+            error_class, error_code = _approval_error_metadata(exc)
+            classifications[ticket_id] = ApprovalClassification(
+                error_class=error_class, error_code=error_code
             )
         else:
             classifications[ticket_id] = ApprovalClassification(result=result)
@@ -11994,6 +12275,14 @@ def _decorate_observation_candidate(
         row["threshold"] = candidate["threshold"][:240]
     if isinstance(candidate.get("demand_snapshot"), Mapping):
         row["demand_snapshot"] = copy.deepcopy(dict(candidate["demand_snapshot"]))
+    if rule.name == "approved_not_landed":
+        if candidate.get("stale") is True:
+            row["stale"] = True
+        for name in ("error_class", "routing_code"):
+            value = candidate.get(name)
+            pattern = r"[A-Za-z][A-Za-z0-9_]{0,79}" if name == "error_class" else r"[a-z][a-z0-9_]{0,79}"
+            if isinstance(value, str) and re.fullmatch(pattern, value):
+                row[name] = value
     return row
 
 
@@ -12636,12 +12925,16 @@ def assert_independent_identity(
 
 
 def assert_complete_agent_view(status: Mapping[str, Any]) -> None:
-    omitted = status.get("omitted_counts", status.get("truncation_counts", {}))
-    omitted_agents = omitted.get("agents", 0) if isinstance(omitted, Mapping) else 0
-    if omitted_agents:
-        raise IdentityConflict(
-            "board butler cannot prove principal independence from a truncated agent view"
-        )
+    for key in ("omitted_counts", "truncation_counts"):
+        if key not in status:
+            continue
+        omitted = status[key]
+        if (not isinstance(omitted, Mapping)
+                or any(type(value) is not int or value < 0 for value in omitted.values())
+                or omitted.get("agents", 0)):
+            raise IdentityConflict(
+                "board butler cannot prove principal independence from a truncated agent view"
+            )
 
 
 def _capable_live_worker(
@@ -13259,6 +13552,52 @@ class CentralProjectRegistry:
         self.audit_events.clear()
 
 
+def _final_validation_evidence_passed(test_output: str, combined_revision: str) -> bool:
+    """Require clean positive evidence tied to the exact final combined head."""
+    if (not isinstance(test_output, str) or not test_output.strip()
+            or re.fullmatch(r"[0-9a-f]{40}", combined_revision) is None
+            or combined_revision not in test_output
+            or re.search(r"\b(fail(?:ed|ure)?|error|blocked|skipped|not run)\b",
+                         test_output, re.I)):
+        return False
+    return bool(re.search(
+        r"\b(pass(?:ed|es)?|success(?:ful|fully)?)\b|\b0\s+failures?\b",
+        test_output, re.I))
+
+
+def _accepted_ticket_scope_evidence(
+    ticket_id: str, submission: Mapping[str, Any], review: Mapping[str, Any],
+    test_output: str,
+) -> dict[str, Any] | None:
+    """Represent a current independent approval as ticket-scope acceptance only.
+
+    The caller has already validated the complete current Central histories and
+    ``accepted_candidate`` (closed, approved, exact-SHA, distinct principals,
+    no unresolved human hold). A nonempty report is required and retained
+    verbatim, but opaque report prose is not reinterpreted as a second blanket
+    project gate. This never asserts that the whole project passed; final QA
+    applies the configured combined checks independently and strictly.
+    """
+    _branch, submitted_sha = submission_identity(submission)
+    submitter = submission.get("submitted_by_principal_id")
+    reviewer = review.get("reviewed_by_principal_id")
+    if (not isinstance(ticket_id, str) or not ticket_id
+            or re.fullmatch(r"[0-9a-f]{40}", submitted_sha) is None
+            or review.get("verdict") != "approve" or review.get("status_to") != "closed"
+            or review.get("submission_commit") != submitted_sha
+            or not isinstance(submitter, str) or not submitter
+            or not isinstance(reviewer, str) or not reviewer or reviewer == submitter
+            or not isinstance(test_output, str) or not test_output.strip()):
+        return None
+    return {
+        "scope_id": "ticket_submission",
+        "acceptance_basis": "current_exact_sha_independent_review",
+        "approved_sha": submitted_sha,
+        "report_preserved_verbatim": True,
+        "final_validation_required": True,
+    }
+
+
 class CentralBackend:
     """Central adapter for push waits, real derivation, reads, and bounded CAS writes."""
 
@@ -13332,6 +13671,9 @@ class CentralBackend:
         ] | None = None
         self._approval_scan_last: dict[str, ApprovalScanOutcome] = {}
         self._approval_scan_failure: str | None = None
+        self._approval_scan_failure_code: str | None = None
+        self._technical_supervisor = TechnicalRecoverySupervisor(self)
+        self._technical_supervision_task: asyncio.Task | None = None
 
     async def _auto_onboard_unknown_projects(
         self,
@@ -13419,9 +13761,17 @@ class CentralBackend:
             await self._context.__aexit__(*sys.exc_info())
             self.client = None
             raise
+        if self._technical_supervisor.enabled():
+            self._technical_supervision_task = asyncio.create_task(
+                self._technical_supervisor.run(), name="board-butler-technical-supervision"
+            )
         return self
 
     async def __aexit__(self, *args: Any) -> None:
+        if self._technical_supervision_task is not None:
+            self._technical_supervision_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._technical_supervision_task
         if self._approval_scan_task is not None:
             self._approval_scan_task.cancel()
             with suppress(asyncio.CancelledError, Exception):
@@ -13448,6 +13798,8 @@ class CentralBackend:
             self._source_intake_task = None
         if self.source_intake_poller is None:
             return dict(self._source_intake_last)
+        if getattr(self, "_source_projection_complete", True) is not True:
+            return {"status": "blocked", "reason_code": "fleet_snapshot_incomplete"}
         if self._source_intake_task is None:
             self._source_intake_task = asyncio.create_task(
                 self._run_source_intake_cycle(now),
@@ -13515,6 +13867,8 @@ class CentralBackend:
 
     async def _source_intake_ceiling(self, in_flight: Mapping[str, int]) -> int:
         """Hard bound: the operator's host seat cap minus intake work in flight."""
+        if getattr(self, "_source_projection_complete", True) is not True:
+            return 0
         async with self._client_for_board(self.args.home_board) as client:
             current = await client.butler_config_get()
         config = current.get("config") if isinstance(current, Mapping) else None
@@ -13564,8 +13918,8 @@ class CentralBackend:
         if runtime is None or runtime.draft_protocol != "openai_chat_completions_v1":
             raise ButlerConfigError("group planner needs a configured chat provider")
         api = runpy.run_path(str(Path(__file__).with_name("source_grouping.py")))
-        prompt = json.dumps(context, separators=(",", ":"))
-        if len(prompt) > 32_000:raise ValueError("group planning context exceeded bound")
+        prompt = _canonical_json_bytes(context).decode("utf-8")
+        if len(prompt.encode("utf-8")) > 32_000:raise ValueError("group planning context exceeded bound")
         body = json.dumps({"model": runtime.model, "messages": [{"role": "system", "content": api["SYSTEM_PROMPT"]}, {"role": "user", "content": prompt}], "max_tokens": 9000, "response_format": {"type": "json_object"}}).encode()
         response = await _post_provider_json(runtime, body, timeout_s=60, max_response_bytes=MAX_PROVIDER_RESPONSE_BYTES)
         text = _openai_chat_draft_text(response)
@@ -13579,6 +13933,8 @@ class CentralBackend:
     async def _source_intake_decide(
         self, context: Mapping[str, Any]
     ) -> Mapping[str, Any]:
+        if getattr(self, "_source_projection_complete", True) is not True:
+            return {"pull": 0, "model_called": False, "reason": "control_plane_snapshot_incomplete"}
         sources = context.get("sources")
         if isinstance(sources, list) and sources and all(
             isinstance(source, Mapping)
@@ -13617,7 +13973,9 @@ class CentralBackend:
         return {**decision, "model_called": cache.model_called, "cache_reused": cache.cache_reused,
                 "model": runtime.model[:120], **evidence}
 
-    async def _source_project_reader(self, board_id: str) -> Mapping[str, Any] | None:
+    async def _source_project_reader(
+        self, board_id: str, *, project_id: str | None = None
+    ) -> Mapping[str, Any] | None:
         from pursers_client.project_registry import parse_project_registry
 
         async with self._client_for_board(self.args.home_board) as client:
@@ -13631,13 +13989,22 @@ class CentralBackend:
                 raw_registry = json.loads(raw_value)
             except json.JSONDecodeError:
                 raw_registry = {}
-        for name, row in (registry.get("projects") or {}).items():
-            if isinstance(row, Mapping) and row.get("board_id") == board_id:
-                original = raw_registry.get('projects', {}).get(name, {}) if isinstance(raw_registry, Mapping) else {}
-                activation = original.get('delivery_policy_activation') if isinstance(original, Mapping) else None
-                return {**row, **({'delivery_policy_activation': activation} if activation is not None else {}),
-                        "__registry__": registry, "__project_name__": name}
-        return None
+        matches = [
+            (name, row) for name, row in (registry.get("projects") or {}).items()
+            if isinstance(row, Mapping) and row.get("board_id") == board_id
+            and (project_id is None or name == project_id)
+        ]
+        # Without an exact registered project key a shared board is ambiguous;
+        # never use the first row as authority for another tenant's workflow.
+        if len(matches) != 1:
+            return None
+        name, row = matches[0]
+        original = raw_registry.get('projects', {}).get(name, {}) if isinstance(raw_registry, Mapping) else {}
+        activation = original.get('delivery_policy_activation') if isinstance(original, Mapping) else None
+        return {**row, **({'delivery_policy_activation': activation} if activation is not None else {}),
+                "__registry__": registry, "__project_name__": name,
+                "final_validation_delivery": original.get("final_validation_delivery", "require_pass")
+                    if isinstance(original, Mapping) else "require_pass"}
 
     async def _source_state_reader(self, board_id: str) -> Mapping[str, Any] | None:
         async with self._client_for_board(board_id) as client:
@@ -13683,10 +14050,9 @@ class CentralBackend:
         self, board_ids: Sequence[str], now: datetime
     ) -> dict[str, ApprovalScanOutcome]:
         """Fetch approvals asynchronously and run bounded git work in a thread."""
-        revision = await asyncio.to_thread(_local_main_revision, self.args.repo)
-        if revision is None:
-            raise RuntimeError("local main revision is unavailable")
-        _main_ref, main_sha = revision
+        from pursers_client.project_registry import parse_project_registry
+
+        registry = parse_project_registry(await self.client.board_state_get("project_registry"))
         results: dict[str, ApprovalScanOutcome] = {}
         for board_id in board_ids:
             async with self._client_for_board(board_id) as client:
@@ -13700,16 +14066,23 @@ class CentralBackend:
                 and row.get("status") == "closed"
                 and row.get("review_verdict") == "approve"
             }
+            # Resolve local metadata in the background thread, pinning each
+            # ticket to its own registered repository/main, including shared boards.
+            bindings = await asyncio.to_thread(
+                lambda: {
+                    ticket_id: _approval_repository_binding(registry, board_id, ticket)
+                    for ticket_id, ticket in tickets.items()
+                }
+            )
+            main_shas = {binding.main_sha for binding in bindings.values()}
+            main_sha = next(iter(main_shas)) if len(main_shas) == 1 else "mixed"
+            main_sha = main_sha or "-"
             context = ObservationContext(
                 board_id=board_id,
                 tickets=tickets,
                 questions=(),
                 now=now,
-                repo=self.args.repo,
-                # Pin the classifier to the SHA used by the cache key so a
-                # concurrent ref update cannot store a new-main result under
-                # the old-main key.
-                main_ref=main_sha,
+                approval_repositories=bindings,
             )
             scanner = self._approval_scanners.setdefault(
                 board_id, ApprovalClassificationCache()
@@ -13733,10 +14106,17 @@ class CentralBackend:
             try:
                 self._approval_scan_last = task.result()
                 self._approval_scan_failure = None
+                self._approval_scan_failure_code = None
             except asyncio.CancelledError:
                 self._approval_scan_failure = "CancelledError"
+                self._approval_scan_failure_code = None
             except Exception as exc:
-                self._approval_scan_failure = type(exc).__name__
+                self._approval_scan_failure, self._approval_scan_failure_code = _approval_error_metadata(exc)
+            if self._approval_scan_failure is not None:
+                self._approval_scan_last = {
+                    board_id: replace(outcome, complete=False)
+                    for board_id, outcome in self._approval_scan_last.items()
+                }
             self._approval_scan_task = None
         active = set(board_ids)
         self._approval_scanners = {
@@ -13767,6 +14147,7 @@ class CentralBackend:
         return {
             "status": status,
             "failure": self._approval_scan_failure,
+            "routing_code": self._approval_scan_failure_code,
             "boards": {
                 board_id: {
                     "complete": outcome.complete,
@@ -13784,13 +14165,8 @@ class CentralBackend:
         self, board_id: str, now: datetime
     ) -> list[Mapping[str, Any]]:
         outcome = self._approval_scan_last.get(board_id)
-        if outcome is not None and outcome.complete:
-            context = ObservationContext(
-                board_id=board_id,
-                tickets={},
-                questions=(),
-                now=now,
-            )
+        context = ObservationContext(board_id=board_id, tickets={}, questions=(), now=now)
+        if outcome is not None and outcome.complete and not self._approval_scan_failure:
             return [
                 _decorate_observation_candidate(
                     context,
@@ -13799,18 +14175,26 @@ class CentralBackend:
                 )
                 for row in outcome.findings
             ]
-        return [
-            approval_scan_coverage_finding(
+        findings = [{
+            "error_class": self._approval_scan_failure,
+            "routing_code": self._approval_scan_failure_code,
+            **approval_scan_coverage_finding(
                 board_id,
                 now,
-                status=(
-                    f"failed:{self._approval_scan_failure}"
-                    if self._approval_scan_failure
-                    else "pending"
-                ),
+                status=f"failed:{self._approval_scan_failure}" if self._approval_scan_failure else "pending",
                 pending=outcome.pending if outcome is not None else None,
-            )
-        ]
+            ),
+        }]
+        if outcome is not None and self._approval_scan_failure:
+            for row in outcome.findings:
+                stale_row = {
+                    **row,
+                    "stale": True,
+                    "evidence": str(row.get("evidence", "")) + "; stale=true",
+                    "message": "Stale prior approval observation: " + str(row.get("message", "")),
+                }
+                findings.append(_decorate_observation_candidate(context, APPROVED_NOT_LANDED_OBSERVATION_RULE, stale_row))
+        return findings
 
     async def _write_source_intake_findings(self, now: datetime) -> None:
         """Replace durable bounded source findings for sources observed this cycle."""
@@ -14171,6 +14555,32 @@ class CentralBackend:
             "document": copy.deepcopy(roster),
         }
 
+    async def _fleet_registry_inventory(self, active_boards, board_snapshots):
+        """Include inactive identities only in the local executor's inventory."""
+        snapshots, memberships = {}, {}
+        for board_id in active_boards:
+            try:
+                async with self._client_for_board(board_id) as client:
+                    snapshot = await client.board_snapshot(
+                        limit=1_000, max_bytes=750_000, include_retired=True
+                    )
+                    assert_complete_agent_view(snapshot)
+                    previous = board_snapshots.get(board_id, {})
+                    if previous.get("coordination_tickets_complete") is True:
+                        snapshot["coordination_tickets"] = copy.deepcopy(previous["coordination_tickets"])
+                        snapshot["coordination_tickets_complete"] = True
+                    elif "coordination_tickets_complete" in previous:
+                        snapshot["coordination_tickets_complete"] = False
+                        snapshot["truncated"] = True
+                        snapshot["omitted_counts"] = {
+                            **snapshot.get("omitted_counts", {}), "tickets": 1,
+                        }
+                    snapshots[board_id] = snapshot
+                    memberships[board_id] = await client._call("board_members", {})
+            except Exception:
+                snapshots[board_id], memberships[board_id] = {}, {}
+        return snapshots, memberships
+
     async def _collect_local_fleet_observation(self, active_boards, board_snapshots, now):
         paths = [getattr(self.args, key, None) for key in
                  ("fleet_local_config", "fleet_executor_config", "fleet_executor_state")]
@@ -14212,13 +14622,7 @@ class CentralBackend:
         state = paths[2]
         if set(document["templates"]) != set(policy.templates):
             raise ButlerConfigError("local fleet template bindings must match executor templates")
-        memberships = {}
-        for board_id in active_boards:
-            try:
-                async with self._client_for_board(board_id) as client:
-                    memberships[board_id] = await client._call("board_members", {})
-            except Exception:
-                memberships[board_id] = {}
+        inventory, memberships = await self._fleet_registry_inventory(active_boards, board_snapshots)
 
         def collect():
             store = executor["ExecutorStore"](state / "executor.sqlite3")
@@ -14236,10 +14640,11 @@ class CentralBackend:
                 observer = observer_api["LocalFleetObserver"](
                     policy.templates, services, stored, document["templates"],
                     recover=store.reconcile_unexpected_stop,
+                    confirm_ready=store.confirm_registry_ready,
                 )
                 # Use the beginning of collection as the freshness origin: slow probes
                 # must not make old registry evidence appear newly observed.
-                observation, readiness, leases = observer.collect(active_boards, board_snapshots, memberships, now, providers, host)
+                observation, readiness, leases = observer.collect(active_boards, inventory, memberships, now, providers, host)
                 observer_api["publish"](state / "registry-readiness.json", readiness)
                 observer_api["publish"](state / "leases.json", leases)
                 observer_api["publish"](self.args.fleet_observation_file, observation)
@@ -14268,6 +14673,16 @@ class CentralBackend:
             raise RuntimeError("fleet runtime configuration is incomplete")
         if getattr(self.args, "runtime_mode", "shadow") != "active":
             raise RuntimeError("fleet reconciliation requires active runtime mode")
+        blocked = {
+            board_id: reason for board_id in active_boards
+            if (reason := fleet_projection_error(board_snapshots.get(board_id))) is not None
+        }
+        if blocked:
+            return {
+                "status": "blocked", "reason_code": "fleet_snapshot_incomplete",
+                "blocked_boards": sorted(blocked)[:20],
+                "reasons": {board: blocked[board] for board in sorted(blocked)[:20]},
+            }
         if self.client is not None:
             await self._apply_host_seat_cap_commands(active_boards, now)
         configs = await self._autonomous_fleet_configs(active_boards)
@@ -15006,6 +15421,26 @@ class CentralBackend:
                         tickets_complete = False
                 else:
                     tickets_complete = False
+        approval_repositories = None
+        if include_approval_tickets:
+            from pursers_client.project_registry import parse_project_registry
+
+            try:
+                registry = parse_project_registry(await self.client.board_state_get("project_registry"))
+                approval_repositories = await asyncio.to_thread(
+                    lambda: {
+                        ticket_id: _approval_repository_binding(registry, board_id, ticket)
+                        for ticket_id, ticket in tickets.items()
+                        if ticket.get("status") == "closed" and ticket.get("review_verdict") == "approve"
+                    }
+                )
+            except Exception as exc:
+                error_class, error_code = _approval_error_metadata(exc)
+                approval_repositories = {
+                    ticket_id: ApprovalRepositoryBinding(None, None, "registry-unavailable", error_class, error_code)
+                    for ticket_id, ticket in tickets.items()
+                    if ticket.get("status") == "closed" and ticket.get("review_verdict") == "approve"
+                }
         return ObservationContext(
             board_id=board_id,
             tickets=tickets,
@@ -15031,12 +15466,7 @@ class CentralBackend:
                 else None
             ),
             host_headroom=read_host_headroom(self.args.repo),
-            repo=self.args.repo if include_approval_tickets else None,
-            main_ref=(
-                _local_main_ref(self.args.repo)
-                if include_approval_tickets
-                else None
-            ),
+            approval_repositories=approval_repositories,
             questions_complete=questions_complete,
             tickets_complete=tickets_complete,
         )
@@ -15265,26 +15695,953 @@ class CentralBackend:
                 STATE_KEY, encoded, expected_sha256=expected
             )
 
+    async def _workflow_delivery_runtime(self, project: Any) -> tuple[Any, dict[str, Any]]:
+        """Lazily resolve the approved delivery binding for one registered project."""
+        from workflow_runtime import build_workflow_runtime
+        return await build_workflow_runtime(self, project)
+
+    @staticmethod
+    def _validated_workflow_registry(
+        raw: Mapping[str, Any], projects: Sequence[Any]
+    ) -> dict[str, Any]:
+        """Keep validated routing while retaining the raw sealed workflow shape."""
+        from pursers_client.project_registry import parse_project_registry
+
+        normalized = parse_project_registry(dict(raw))
+        state = raw.get("state")
+        value = state.get("value") if isinstance(state, Mapping) else None
+        document = json.loads(value) if isinstance(value, str) else None
+        if not isinstance(document, Mapping) or not isinstance(document.get("projects"), Mapping):
+            raise ValueError("authoritative project registry is incomplete")
+        active_routes = {
+            (str(row.name), str(row.board_id))
+            for row in projects
+            if isinstance(getattr(row, "name", None), str)
+            and isinstance(getattr(row, "board_id", None), str)
+        }
+        for project in projects:
+            original = document["projects"].get(getattr(project, "name", None))
+            if (not isinstance(original, Mapping)
+                    or original.get("board_id") != getattr(project, "board_id", None)
+                    or original.get("status") != getattr(project, "status", None)
+                    or original.get("work_dir") != str(getattr(project, "work_dir", ""))):
+                raise ValueError("project registry routing changed during the coordinator refresh")
+            for field in ("butler_workflow", "butler_workflow_activation"):
+                if original.get(field) != getattr(project, field, None):
+                    raise ValueError("project workflow activation changed during coordinator refresh")
+            if original.get("final_validation_delivery", "require_pass") != getattr(
+                    project, "final_validation_delivery", "require_pass"):
+                raise ValueError("project final-validation delivery mode changed during coordinator refresh")
+            for field in ("work_dir_owner", "fleet_clone_dir", "repository_url"):
+                if original.get(field, "operator" if field == "work_dir_owner" else None) != getattr(project, field, "operator" if field == "work_dir_owner" else None):
+                    raise ValueError("project native delivery routing changed during coordinator refresh")
+        registry_routes = {
+            (name, row["board_id"])
+            for name, row in normalized["projects"].items()
+            if row.get("status") == "active"
+        }
+        if len(active_routes) != len(projects) or active_routes != registry_routes:
+            raise ValueError("project registry changed during the coordinator refresh")
+
+        # parse_project_registry deliberately normalizes workflow node lists to
+        # dictionaries. The project-workflow contract needs the original sealed
+        # list, so restore only those fields after the complete registry validates.
+        retained: dict[str, Any] = {}
+        raw_projects = document["projects"]
+        for name, row in normalized["projects"].items():
+            exact = dict(row)
+            original = raw_projects.get(name)
+            if isinstance(original, Mapping):
+                for field in (
+                    "butler_workflow", "butler_workflow_activation",
+                    "butler_recovery_policy", "final_validation_delivery",
+                ):
+                    if field in original:
+                        exact[field] = original[field]
+            retained[name] = exact
+        return {**normalized, "projects": retained}
+
+    async def _source_ticket_workflow_owned(
+        self, board_id: str, ticket: Mapping[str, Any]
+    ) -> bool:
+        """Whether exact registered routing assigns a source ticket to native QA."""
+        registry = getattr(self, "_workflow_registry", None)
+        if not isinstance(registry, Mapping):
+            annotations = ticket.get("annotations", [])
+            managed_source = str(ticket.get("ticket_id", "")).startswith("TK-intake-") or (
+                isinstance(annotations, list) and any(
+                    isinstance(row, Mapping) and isinstance(row.get("text"), str)
+                    and "source-revision-sha256:" in row["text"] for row in annotations
+                )
+            )
+            if managed_source:
+                raise ConnectorDenied("native workflow registry is unavailable for managed source")
+            return False
+        from pursers_client.project_registry import RegistryRoutingError, resolve_registry_target
+        from pursers_client.project_workflow import (
+            parse_project_workflow, parse_workflow_activation, ticket_belongs_to_project,
+        )
+        annotations = ticket.get("annotations", [])
+        managed_source = str(ticket.get("ticket_id", "")).startswith("TK-intake-") or (
+            isinstance(annotations, list) and any(
+                isinstance(row, Mapping) and isinstance(row.get("text"), str)
+                and "source-revision-sha256:" in row["text"] for row in annotations
+            )
+        )
+        target = ticket.get("target_url")
+        if not isinstance(target, str):
+            if managed_source:
+                raise ConnectorDenied("managed source ticket has no verifiable project route")
+            return False
+        try:
+            route = resolve_registry_target(dict(registry), board_id, target)
+        except RegistryRoutingError as exc:
+            if not managed_source and exc.code in {"project_route_not_registered", "repository_url_not_registered"}:
+                return False
+            raise ConnectorDenied("native workflow source route is ambiguous or invalid") from exc
+        project_name = route.get("project")
+        project = (registry.get("projects") or {}).get(project_name)
+        if not isinstance(project, Mapping) or project.get("board_id") != board_id:
+            raise ConnectorDenied("native workflow source route is unavailable")
+        policy = project.get("butler_workflow")
+        raw_activation = project.get("butler_workflow_activation")
+        if project.get("butler_workflow_error"):
+            raise ConnectorDenied("native workflow configuration is invalid")
+        if policy is None:
+            if raw_activation is not None:
+                raise ConnectorDenied("native workflow activation has no validated policy")
+            return False
+        try:
+            normalized = parse_project_workflow(policy, project_id=project_name, board_id=board_id)
+            activation = parse_workflow_activation(raw_activation, normalized)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ConnectorDenied("native workflow source ownership is uncertain") from exc
+        if activation is None:
+            return False
+        if not ticket_belongs_to_project(ticket, registry, board_id=board_id, project_id=project_name):
+            raise ConnectorDenied("native workflow source route could not be verified")
+        return True
+
+    def _workflow_source_intake_entry(
+        self, project_name: str, board_id: str, ticket_id: str
+    ) -> tuple[Any, str, dict[str, str]]:
+        """Find exactly one durable source-index entry for this registered member."""
+        poller = self.source_intake_poller
+        index = getattr(poller, "index", None)
+        entries = getattr(index, "entries", None)
+        if poller is None or not isinstance(entries, Mapping):
+            raise ConnectorDenied("source workflow has no durable intake index")
+        sources = {
+            source.source_id: source for source in getattr(poller, "sources", ())
+            if isinstance(getattr(source, "source_id", None), str)
+        }
+        matches: list[tuple[str, dict[str, str]]] = []
+        for key, entry in entries.items():
+            if (not isinstance(key, str) or not isinstance(entry, dict)
+                    or entry.get("board_id") != board_id
+                    or entry.get("ticket_id") != ticket_id):
+                continue
+            source = sources.get(entry.get("source_id"))
+            if source is None:
+                continue
+            hint = entry.get("project_hint")
+            if not isinstance(hint, str):
+                continue
+            route = (hint if source.routing.project_hint_is_registry_key
+                     else source.routing.project_map.get(hint))
+            if route == project_name:
+                matches.append((key, entry))
+        if len(matches) != 1:
+            raise ConnectorDenied("source workflow intake identity is missing or ambiguous")
+        return index, matches[0][0], matches[0][1]
+
+    def _workflow_source_issue_ids(
+        self, project_name: str, board_id: str, ticket_id: str
+    ) -> list[str]:
+        """Recover original source member IDs from the exact durable intake row."""
+        _index, _key, entry = self._workflow_source_intake_entry(
+            project_name, board_id, ticket_id
+        )
+        raw_ids: Any = entry.get("member_ids")
+        if isinstance(raw_ids, str):
+            try:
+                raw_ids = json.loads(raw_ids)
+            except json.JSONDecodeError as exc:
+                raise ConnectorDenied("source workflow member IDs are invalid") from exc
+        if raw_ids is None:
+            raw_ids = [entry.get("external_id")]
+        if (not isinstance(raw_ids, list) or not raw_ids
+                or any(not isinstance(value, str) or not value or value != value.strip()
+                       for value in raw_ids)
+                or len(set(raw_ids)) != len(raw_ids)):
+            raise ConnectorDenied("source workflow member IDs are incomplete or ambiguous")
+        return list(raw_ids)
+
+    async def _settle_workflow_source_delivery(
+        self, project_name: str, board_id: str, members: Sequence[Mapping[str, Any]],
+        qa_ticket_id: str, prepared: Mapping[str, Any], result: Mapping[str, Any],
+        runtime: Any, delivery_policy: Mapping[str, Any],
+    ) -> int:
+        """Settle only a delivery proven by the wrapper's durable runtime ledger.
+
+        Release responses intentionally omit PR identifiers on replay, and a
+        branch-only publication has no PR at all. Derive those receipts only
+        from the exact prepared batch and its validated, correlated ledger row;
+        unknown or mismatched outcomes remain in-flight.
+        """
+        if result.get("state") not in {"in_delivery", "delivery_open"}:
+            return 0
+        batch_key = prepared.get("batch_key")
+        combined_sha = prepared.get("combined_revision")
+        policy_mode = delivery_policy.get("mode")
+        if (not isinstance(batch_key, str) or not batch_key
+                or result.get("batch_key") != batch_key
+                or not isinstance(combined_sha, str)
+                or not re.fullmatch(r"[0-9a-f]{40}", combined_sha)):
+            return 0
+        ledger = getattr(runtime, "ledger", None)
+        document = getattr(ledger, "document", None)
+        batches = document.get("batches") if isinstance(document, Mapping) else None
+        batch = batches.get(batch_key) if isinstance(batches, Mapping) else None
+        if (not isinstance(batch, Mapping)
+                or batch.get("state") not in {"delivery_open", "in_delivery"}
+                or batch.get("batch_key") != batch_key
+                or batch.get("mode") != policy_mode
+                or batch.get("effective_policy_revision") != prepared.get("delivery_policy_revision")
+                or batch.get("working_head") != combined_sha
+                or batch.get("snapshot_sha") != combined_sha
+                or batch.get("snapshot_frozen") is not True):
+            return 0
+        binding = batch.get("workflow_delivery")
+        if not isinstance(binding, Mapping) or any(
+            binding.get(key) != prepared.get(key) for key in (
+                "cohort_id", "workflow_policy_sha256", "final_validation_policy_sha256",
+                "member_manifest", "member_refs", "member_evidence_digests", "combined_revision",
+            )
+        ):
+            return 0
+        snapshot_branch = batch.get("snapshot_branch")
+        if (not isinstance(snapshot_branch, str) or not snapshot_branch
+                or (isinstance(delivery_policy.get("snapshot_prefix"), str)
+                    and not snapshot_branch.startswith(delivery_policy["snapshot_prefix"].rstrip("/") + "/"))):
+            return 0
+
+        pr_id: str | int | None = None
+        adapter = getattr(runtime, "adapter", None)
+        if policy_mode == "branch_only":
+            if (batch.get("customer_pr") is not None
+                    or (result.get("branch") is not None and result.get("branch") != snapshot_branch)):
+                return 0
+            try:
+                observed_snapshot = await adapter.read_ref(delivery_policy["repository"], snapshot_branch)
+            except Exception:
+                return 0
+            if observed_snapshot != combined_sha:
+                return 0
+            receipt_state = "branch_published"
+        elif policy_mode == "batch_pr":
+            pr = batch.get("customer_pr")
+            if (not isinstance(pr, Mapping)
+                    or isinstance(pr.get("id"), bool)
+                    or not isinstance(pr.get("id"), (str, int))
+                    or (isinstance(pr.get("id"), str) and not pr["id"].strip())
+                    or (isinstance(pr.get("id"), int) and pr["id"] < 1)
+                    or pr.get("correlation") != batch_key
+                    or pr.get("source_sha") != combined_sha
+                    or pr.get("source_branch") != snapshot_branch
+                    or pr.get("target_branch") != delivery_policy.get("target_branch")):
+                return 0
+            if result.get("pr_id") is not None and str(result["pr_id"]) != str(pr["id"]):
+                return 0
+            try:
+                confirmed_pr = await adapter.get_customer_pr(
+                    delivery_policy["repository"], pr["id"])
+            except Exception:
+                return 0
+            if (not isinstance(confirmed_pr, Mapping)
+                    or confirmed_pr.get("id") != pr["id"]
+                    or confirmed_pr.get("status") != "active"
+                    or confirmed_pr.get("correlation") != batch_key
+                    or confirmed_pr.get("source_sha") != combined_sha
+                    or confirmed_pr.get("source_branch") != snapshot_branch
+                    or confirmed_pr.get("target_branch") != delivery_policy.get("target_branch")):
+                return 0
+            pr_id = pr["id"]
+            receipt_state = "pr_created"
+        else:
+            # Per-ticket delivery is not a native cohort receipt.
+            return 0
+
+        source_members = [member for member in members if member.get("origin") == "managed-source"]
+        if not source_members:
+            return 0
+        poller = self.source_intake_poller
+        index = getattr(poller, "index", None)
+        if index is None:
+            raise ConnectorDenied("confirmed native source delivery has no durable intake index")
+        updates: list[tuple[str, dict[str, str]]] = []
+        for member in source_members:
+            ticket_id = member.get("ticket_id")
+            issue_ids = member.get("issue_ids")
+            if (not isinstance(ticket_id, str) or not isinstance(issue_ids, list)
+                    or not issue_ids or issue_ids != self._workflow_source_issue_ids(
+                        project_name, board_id, ticket_id)):
+                raise ConnectorDenied("confirmed native source delivery lost its exact intake identity")
+            source_index, key, entry = self._workflow_source_intake_entry(
+                project_name, board_id, ticket_id
+            )
+            if source_index is not index:
+                raise ConnectorDenied("native source intake index changed during publication")
+            if entry.get("status") == "delivered":
+                expected_pr = str(pr_id) if pr_id is not None else None
+                if (entry.get("native_workflow_qa_ticket_id") != qa_ticket_id
+                        or entry.get("native_workflow_pr_id") != expected_pr
+                        or entry.get("native_workflow_branch") != (None if pr_id is not None else snapshot_branch)
+                        or entry.get("native_workflow_commit") != combined_sha
+                        or entry.get("delivery_state") != receipt_state):
+                    raise ConnectorDenied("source index already records conflicting native delivery")
+                continue
+            if entry.get("status") not in {"asked", "delivering"}:
+                raise ConnectorDenied("source intake entry is not eligible for delivery settlement")
+            updates.append((key, entry))
+        for _key, entry in updates:
+            entry["status"] = "delivered"
+            entry["native_workflow_state"] = "published"
+            entry["native_workflow_qa_ticket_id"] = qa_ticket_id
+            if pr_id is not None:
+                entry["native_workflow_pr_id"] = str(pr_id)
+                entry.pop("native_workflow_branch", None)
+            else:
+                entry.pop("native_workflow_pr_id", None)
+                entry["native_workflow_branch"] = snapshot_branch
+            entry["native_workflow_commit"] = combined_sha
+            entry["delivery_state"] = receipt_state
+        # Persist even when every row already carries the matching terminal
+        # identity: a prior save may have failed after the in-memory mutation.
+        index.dirty = True
+        index.save()
+        return len(updates)
+
+    async def _reconcile_project_workflows(
+        self,
+        board_id: str,
+        projects: Sequence[Any],
+        tickets: Mapping[str, Mapping[str, Any]],
+        *,
+        registry: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Reconcile activated, route-bound projects through native QA-gated delivery."""
+        if getattr(self.args, "runtime_mode", "shadow") != "active":
+            return []
+        from pursers_client import BoardClientError
+        from pursers_client.project_workflow import (
+            accepted_candidate, final_validation_packet, parse_final_validation_packet_index,
+            final_validation_ticket_id, parse_project_workflow,
+            parse_workflow_activation, reconcile, ticket_belongs_to_project,
+        )
+        from pursers_client.submission_evidence import submission_test_output
+
+        if not isinstance(registry, Mapping):
+            if getattr(self, "_workflow_registry_error", None) is not None:
+                return [
+                    {"kind": "workflow_blocked", "project": getattr(row, "name", "unknown"),
+                     "reason": "authoritative_project_registry_unavailable"}
+                    for row in projects
+                    if isinstance(getattr(row, "butler_workflow", None), Mapping)
+                ]
+            registry = {"schema_version": 1, "projects": {
+                row.name: {"board_id": row.board_id,
+                           "status": getattr(row, "status", "active"),
+                           "fleet": True,
+                           "work_dir": str(getattr(row, "work_dir", f"/{row.name}")),
+                           "work_dir_owner": getattr(row, "work_dir_owner", "fleet"),
+                           "fleet_clone_dir": getattr(row, "fleet_clone_dir", None),
+                           "repository_url": getattr(row, "repository_url", None)}
+                for row in projects if isinstance(getattr(row, "name", None), str)
+            }}
+
+        async def complete_history(client: Any, ticket_id: str, ticket: Mapping[str, Any],
+                                   history: str) -> list[Mapping[str, Any]] | None:
+            field = f"{history}_history"
+            rows = ticket.get(field)
+            omitted = ticket.get(f"{field}_omitted_count", 0)
+            if type(omitted) is not int or omitted < 0:
+                return None
+            if omitted == 0 and isinstance(rows, list) and all(isinstance(row, Mapping) for row in rows):
+                return list(rows)
+            hydrated: list[Mapping[str, Any]] = []
+            cursor = None
+            for _ in range(10_000):
+                page = await client.ticket_history_list(ticket_id, history, limit=100, cursor=cursor)
+                if page.get("retention_complete") is not True:
+                    return None
+                entries = page.get("entries")
+                if not isinstance(entries, list):
+                    return None
+                for entry in entries:
+                    value = entry.get("value") if isinstance(entry, Mapping) else None
+                    if not isinstance(value, Mapping):
+                        return None
+                    hydrated.append(value)
+                if not page.get("has_more"):
+                    return hydrated
+                cursor = page.get("next_cursor")
+                if not isinstance(cursor, str) or not cursor:
+                    return None
+            return None
+
+        def current_evidence(ticket: Mapping[str, Any]) -> tuple[Mapping[str, Any], Mapping[str, Any]] | None:
+            submissions, reviews = ticket.get("submission_history"), ticket.get("review_history")
+            if (not isinstance(submissions, list) or not submissions
+                    or not isinstance(reviews, list) or not reviews):
+                return None
+            submission, review = submissions[-1], reviews[-1]
+            latest_submission = ticket.get("latest_submission")
+            latest_review = ticket.get("latest_verdict")
+            if (not isinstance(submission, Mapping) or not isinstance(review, Mapping)
+                    or (isinstance(latest_submission, Mapping) and latest_submission != submission)
+                    or (isinstance(latest_review, Mapping) and latest_review != review)):
+                return None
+            return submission, review
+
+        def passing_test_evidence(text: str) -> bool:
+            # Only explicit positive test outcomes are eligible; a free-form
+            # review approval is never transmuted into an invented pass flag.
+            if not text or re.search(r"\b(fail(?:ed|ure)?|error|blocked|skipped|not run)\b", text, re.I):
+                return False
+            return bool(re.search(r"\b(pass(?:ed|es)?|success(?:ful|fully)?)\b|\b0\s+failures?\b", text, re.I))
+
+        def evidence_label(text: str, label: str) -> str:
+            lines = [line.strip() for line in text.splitlines()
+                     if re.match(rf"\s*{re.escape(label)}\s*:", line, re.I)]
+            return "\n".join(lines)[:3_900] if lines else (
+                f"{label.replace('_', ' ').capitalize()} were not separately reported in the accepted ticket evidence."
+            )
+
+        def normalized_delivery_policy(policy: Mapping[str, Any], activation: Mapping[str, Any],
+                                       members: list[dict[str, Any]]) -> dict[str, Any]:
+            ticket_to_node = {node["ticket_id"]: node_id for node_id, node in policy["nodes"].items()}
+            member_ids = [policy["nodes"][node_id]["ticket_id"] for node_id in policy["nodes"]]
+            body = {
+                "schema_version": 1, "board_id": policy["board_id"],
+                "project_name": policy["project_id"], "cohort_id": policy["cohort_id"],
+                "member_ticket_ids": member_ids,
+                "nodes": {policy["nodes"][node_id]["ticket_id"]: {
+                    "prerequisites": [policy["nodes"][dep]["ticket_id"]
+                                      for dep in policy["nodes"][node_id]["requires"]]}
+                    for node_id in policy["nodes"]},
+                "final_validation": {
+                    "enabled": True, "combined_revision": None,
+                    "title": policy["final_validation"]["title"],
+                    "scope": "Run the configured acceptance checks on the exact immutable combined revision.",
+                    "required_fields": ["branch_and_commit", "test_output"],
+                    "checks": [check for node in policy["nodes"].values()
+                               for check in node["acceptance_checks"]]
+                              + list(policy["final_validation"]["acceptance_checks"]),
+                },
+            }
+            sealed_body = {key: value for key, value in body.items()}
+            body["activation_id"] = activation["activation_id"]
+            body["policy_revision"] = hashlib.sha256(json.dumps(
+                sealed_body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode()).hexdigest()
+            del ticket_to_node
+            return body
+
+        async def annotation_texts(client: Any, ticket_id: str,
+                                   ticket: Mapping[str, Any]) -> list[str] | None:
+            rows = ticket.get("annotations")
+            omitted = ticket.get("annotations_omitted_count", 0)
+            if isinstance(rows, list) and omitted == 0 and ticket.get("annotation_count", len(rows)) == len(rows):
+                return [row["text"] for row in rows if isinstance(row, Mapping)
+                        and isinstance(row.get("text"), str)]
+            texts: list[str] = []
+            cursor = None
+            while True:
+                page = await client.ticket_history_list(ticket_id, "annotations", limit=100, cursor=cursor)
+                if page.get("retention_complete") is not True:
+                    return None
+                entries = page.get("entries")
+                if not isinstance(entries, list):
+                    return None
+                for entry in entries:
+                    value = entry.get("value") if isinstance(entry, Mapping) else None
+                    if not isinstance(value, Mapping) or not isinstance(value.get("text"), str):
+                        return None
+                    texts.append(value["text"])
+                if not page.get("has_more"):
+                    return texts
+                cursor = page.get("next_cursor")
+                if not isinstance(cursor, str) or not cursor:
+                    return None
+
+        actions: list[dict[str, Any]] = []
+        for project in projects:
+            if getattr(project, "board_id", None) != board_id:
+                continue
+            raw_policy = getattr(project, "butler_workflow", None)
+            if not isinstance(raw_policy, Mapping):
+                continue
+            try:
+                policy = parse_project_workflow(raw_policy, project_id=project.name, board_id=board_id)
+                required_ids = {node["ticket_id"] for node in policy["nodes"].values()}
+                if not required_ids.issubset(tickets):
+                    actions.append({"kind": "workflow_blocked", "project": project.name,
+                                    "reason": "sealed_manifest_projection_incomplete"})
+                    continue
+                if any(not ticket_belongs_to_project(tickets[ticket_id], registry,
+                        board_id=board_id, project_id=project.name) for ticket_id in required_ids):
+                    actions.append({"kind": "workflow_blocked", "project": project.name,
+                                    "reason": "sealed_manifest_project_route_mismatch"})
+                    continue
+                activation = parse_workflow_activation(
+                    getattr(project, "butler_workflow_activation", None), policy)
+                registry_projects = registry.get("projects") if isinstance(registry, Mapping) else None
+                registry_project = (registry_projects.get(project.name)
+                                    if isinstance(registry_projects, Mapping) else None)
+                final_validation_delivery = (
+                    registry_project.get("final_validation_delivery", "require_pass")
+                    if isinstance(registry_project, Mapping) else
+                    getattr(project, "final_validation_delivery", "require_pass"))
+                if activation is None:
+                    continue
+
+
+
+                async with self._client_for_board(board_id) as evidence_client:
+                    project_tickets = dict(tickets)
+                    for evidence_ticket_id in required_ids:
+                        rows = project_tickets.get(evidence_ticket_id)
+                        if rows is None:
+                            continue
+                        complete_submissions = await complete_history(
+                            evidence_client, evidence_ticket_id, rows, "submissions")
+                        complete_reviews = await complete_history(
+                            evidence_client, evidence_ticket_id, rows, "reviews")
+                        if complete_submissions is not None and complete_reviews is not None:
+                            hydrated = dict(rows)
+                            hydrated["submission_history"] = complete_submissions
+                            hydrated["review_history"] = complete_reviews
+                            hydrated["submission_history_omitted_count"] = 0
+                            hydrated["review_history_omitted_count"] = 0
+                            if complete_submissions:
+                                hydrated["latest_submission"] = complete_submissions[-1]
+                            if complete_reviews:
+                                hydrated["latest_verdict"] = complete_reviews[-1]
+                            project_tickets[evidence_ticket_id] = hydrated
+
+                accepted: dict[str, str] = {}
+                members: list[dict[str, Any]] = []
+                for node_id, node in policy["nodes"].items():
+                    ticket_id = node["ticket_id"]
+                    ticket = project_tickets[ticket_id]
+                    ok, sha = accepted_candidate(ticket)
+                    if not ok or not sha:
+                        continue
+                    evidence_rows = current_evidence(ticket)
+                    if evidence_rows is None:
+                        raise ValueError("accepted source submission or independent review history is incomplete")
+                    submission, review = evidence_rows
+                    from pursers_client.submission_evidence import submission_identity
+                    source_ref, source_sha = submission_identity(submission)
+                    if source_sha != sha or not source_ref:
+                        raise ValueError("approved source identity is ambiguous")
+                    tests = submission.get("test_output")
+                    if not isinstance(tests, str) or not tests.strip():
+                        tests = submission_test_output(submission.get("notes"))
+                    # A complete current independent approval is the
+                    # ticket-scope acceptance decision. Reports may disclose
+                    # unrelated baseline failures; preserve them verbatim and
+                    # do not turn them into an extra blanket project gate.
+                    scoped_acceptance = _accepted_ticket_scope_evidence(
+                        ticket_id, submission, review, tests
+                    )
+                    if scoped_acceptance is None:
+                        raise ValueError(f"ticket {ticket_id} lacks current independent ticket-scope evidence")
+                    review_notes = str(review.get("review_notes") or "")
+                    submission_notes = str(submission.get("notes") or "")
+                    evidence_text = "\n".join((submission_notes, tests, review_notes))
+                    if scoped_acceptance is not None:
+                        evidence_text += "\nScoped acceptance evidence: " + json.dumps(
+                            scoped_acceptance, sort_keys=True, separators=(",", ":")
+                        )
+                    annotations = ticket.get("annotations", [])
+                    source_origin = "managed-source" if (
+                        ticket_id.startswith("TK-intake-") or
+                        (isinstance(annotations, list) and any(
+                            isinstance(row, Mapping) and isinstance(row.get("text"), str)
+                            and "source-revision-sha256:" in row["text"] for row in annotations))
+                    ) else "coordinator"
+                    issue_ids = (
+                        self._workflow_source_issue_ids(project.name, board_id, ticket_id)
+                        if source_origin == "managed-source" else []
+                    )
+                    submitter = submission.get("submitted_by_principal_id")
+                    reviewer = review.get("reviewed_by_principal_id")
+                    if not submitter or not reviewer or submitter == reviewer:
+                        raise ValueError("independent source-review identities are unavailable")
+                    member_evidence = {"approved_sha": sha, "independent_review": True,
+                        # This is scoped ticket acceptance backed by the actual
+                        # current review, never a claim of whole-project green.
+                        "validation_passed": True,
+                        "source_origin": source_origin,
+                        "submission_test_output": tests,
+                        "source_issue_ids": list(issue_ids),
+                        "submitter_principal_id": submitter,
+                        "reviewer_principal_id": reviewer,
+                        "reviewed_submission_sha": review.get("submission_commit"),
+                        "review_notes": review_notes,
+                        "submission_notes": submission_notes}
+                    if scoped_acceptance is not None:
+                        member_evidence["validation_scope"] = scoped_acceptance["scope_id"]
+                        member_evidence["scoped_acceptance"] = scoped_acceptance
+                    # Keep the complete ticket/review reports separately and
+                    # expose any explicitly labelled baseline section without
+                    # parsing arbitrary prose into a new project-wide veto.
+                    reported_baseline = evidence_label(evidence_text, "baseline_failures")
+                    members.append({
+                        "ticket_id": ticket_id, "source_ref": source_ref, "source_sha": sha,
+                        "issue_ids": issue_ids, "summary": str(submission.get("summary") or ticket.get("title") or ticket_id)[:4_000],
+                        "tests": tests[:8_000], "blockers": evidence_label(evidence_text, "blockers"),
+                        "baseline_failures": reported_baseline,
+                        "origin": source_origin, "evidence": member_evidence,
+                    })
+                    accepted[ticket_id] = sha
+
+                final_id = final_validation_ticket_id(policy)
+                prepared: Mapping[str, Any] | None = None
+                if len(accepted) == len(required_ids):
+                    runtime, delivery_policy = await self._workflow_delivery_runtime(project)
+                    # The approved adapter performs exact-source integration
+                    # and derives its actual cumulative Git head. The caller
+                    # seals a pending-head policy; it never predicts a commit.
+                    delivery_workflow = normalized_delivery_policy(policy, activation, members)
+                    from workflow_delivery import prepare_workflow_delivery, workflow_delivery_attestation
+                    prepared_result = await prepare_workflow_delivery(
+                        runtime, delivery_policy, delivery_workflow, members,
+                        final_validation_ticket_id=final_id)
+                    if prepared_result.get("state") != "prepared":
+                        raise ValueError("workflow delivery preparation is blocked: " + str(prepared_result.get("reason", prepared_result.get("state"))))
+                    prepared = prepared_result
+                    delivery_attestation = workflow_delivery_attestation(prepared)
+                else:
+                    delivery_workflow = None
+                    delivery_attestation = None
+
+                intent = reconcile(policy, project_tickets, combined_revision=(prepared or {}).get("combined_revision"),
+                                   final_task_exists=final_id in tickets)
+                async with self._client_for_board(board_id) as client:
+                    for ticket_id in intent["releases"]:
+                        result = await client.ticket_update(ticket_id, parked=False)
+                        actions.append({"kind": "workflow_dependency_released", "ticket_id": ticket_id,
+                                        "project": project.name, "result": result.get("ok", True)})
+                    final = intent["final_task"]
+                    if (final is None and intent["all_accepted"] and prepared is not None and final_id in tickets):
+                        final = {"ticket_id": final_id, "title": policy["final_validation"]["title"],
+                                 "combined_revision": prepared["combined_revision"],
+                                 "members": intent["accepted_members"],
+                                 "acceptance_checks": policy["final_validation"]["acceptance_checks"]}
+                    if final is not None:
+                        evidence_by_member = {member["ticket_id"]: member for member in members}
+                        description, packet_pages = final_validation_packet(
+                            policy, final, delivery=prepared, member_evidence=evidence_by_member,
+                            delivery_attestation=delivery_attestation)
+                        final_row = tickets.get(final["ticket_id"])
+                        if final_row is None:
+                            created = await client.ticket_create(
+                                final["ticket_id"], final["title"], description=description,
+                                scope="interactive-no-send", required_fields=["branch_and_commit", "test_output"],
+                                forbidden=["customer_base_branch_write", "force_push", "customer_final_merge"],
+                                priority="high", tags=["butler-workflow", "final-validation"],
+                                target_url=project.name, unassigned=True)
+                            final_row = created.get("ticket", {})
+                            actions.append({"kind": "workflow_final_validation_created",
+                                            "ticket_id": created.get("ticket_id", final["ticket_id"]),
+                                            "project": project.name})
+                        try:
+                            packet_index = parse_final_validation_packet_index(final_row.get("description"))
+                        except ValueError:
+                            packet_index = None
+                        if (packet_index is None or final_row.get("description") != description):
+                            actions.append({"kind": "workflow_blocked", "project": project.name,
+                                            "reason": "final_validation_packet_mismatch"})
+                            continue
+                        existing_texts = await annotation_texts(client, final["ticket_id"], final_row)
+                        if existing_texts is None:
+                            actions.append({"kind": "workflow_blocked", "project": project.name,
+                                            "reason": "final_validation_annotation_history_incomplete"})
+                            continue
+                        for page in packet_pages:
+                            if page not in existing_texts:
+                                await client.ticket_annotate(final["ticket_id"], page, kind="evidence")
+                                existing_texts.append(page)
+
+                        # Full Central ticket projections may omit latest aliases even
+                        # when their retained histories are available. Hydrate the
+                        # immutable records below before judging the final QA verdict.
+                        if final_validation_delivery not in {"require_pass", "draft_with_report"}:
+                            raise ValueError("project final-validation delivery mode is unsupported")
+                        draft_report_mode = final_validation_delivery == "draft_with_report"
+                        qa_row_status = final_row.get("status")
+                        held_final_qa = (
+                            draft_report_mode and qa_row_status == "needs_human"
+                            and isinstance(final_row.get("human_request"), Mapping)
+                            and final_row["human_request"].get("resolution") is None
+                        )
+                        if (qa_row_status == "closed"
+                                or (draft_report_mode and qa_row_status in {"open", "rejected"})
+                                or held_final_qa):
+                            import json as _json
+                            import re as _re
+                            pages = [text for text in existing_texts
+                                     if text.startswith("butler-workflow-packet:v1:")]
+                            match_pages = {}
+                            packet_sha = None
+                            page_count = None
+                            for text in pages:
+                                match = _re.fullmatch(r"butler-workflow-packet:v1:([0-9a-f]{64}):(\d+)/(\d+):(.*)", text, _re.S)
+                                if not match:
+                                    continue
+                                digest, index, count, chunk = match.groups()
+                                if packet_sha is not None and digest != packet_sha:
+                                    raise ValueError("final QA evidence includes conflicting workflow packets")
+                                packet_sha, page_count = digest, int(count)
+                                match_pages[int(index)] = chunk
+                            qa_payload = None
+                            if (packet_sha == packet_index["evidence_packet"]["sha256"]
+                                    and page_count == packet_index["evidence_packet"]["chunks"]
+                                    and page_count == len(match_pages)
+                                    and set(match_pages) == set(range(1, page_count + 1))):
+                                encoded = "".join(match_pages[index] for index in range(1, page_count + 1))
+                                if hashlib.sha256(encoded.encode()).hexdigest() == packet_sha:
+                                    qa_payload = _json.loads(encoded)
+                            if not isinstance(qa_payload, Mapping) or qa_payload.get("workflow_delivery") != dict(prepared):
+                                raise ValueError("final QA evidence does not bind the exact prepared delivery identity")
+                            qa_submissions = await complete_history(
+                                client, final["ticket_id"], final_row, "submissions")
+                            qa_reviews = await complete_history(
+                                client, final["ticket_id"], final_row, "reviews")
+                            if not qa_submissions or not qa_reviews:
+                                raise ValueError("final QA submission or review history is incomplete")
+                            hydrated_qa = dict(final_row)
+                            hydrated_qa["submission_history"] = qa_submissions
+                            hydrated_qa["review_history"] = qa_reviews
+                            hydrated_qa["submission_history_omitted_count"] = 0
+                            hydrated_qa["review_history_omitted_count"] = 0
+                            hydrated_qa["latest_submission"] = qa_submissions[-1]
+                            hydrated_qa["latest_verdict"] = qa_reviews[-1]
+                            qa_evidence = current_evidence(hydrated_qa)
+                            if qa_evidence is None:
+                                raise ValueError("final QA evidence is not the exact latest Central record")
+                            qa_submission, qa_review = qa_evidence
+                            from pursers_client.submission_evidence import submission_identity as _submission_identity
+                            _qa_branch, qa_sha = _submission_identity(qa_submission)
+                            qa_tests = qa_submission.get("test_output") or submission_test_output(qa_submission.get("notes"))
+                            from workflow_delivery import publish_workflow_delivery, workflow_delivery_attestation
+                            marker = workflow_delivery_attestation(prepared)
+                            marker_match = _re.findall(
+                                r"(?m)^workflow_delivery_sha256: [0-9a-f]{64}$",
+                                str(qa_submission.get("notes") or ""))
+                            review_marker = _re.findall(
+                                r"(?m)^workflow_delivery_sha256: [0-9a-f]{64}$",
+                                str(qa_review.get("review_notes") or ""))
+                            verdict = qa_review.get("verdict")
+                            if (qa_payload.get("workflow_delivery_attestation") != marker
+                                    or len(marker_match) != 1 or marker_match[0] != marker):
+                                raise ValueError("actual QA submission lacks the exact prepared-identity attestation")
+                            if not draft_report_mode and (
+                                    len(review_marker) != 1 or review_marker[0] != marker):
+                                raise ValueError("actual independent QA approval lacks the exact prepared-identity attestation")
+                            if (not qa_sha or qa_sha != prepared["combined_revision"]
+                                    or qa_review.get("submission_commit") != qa_sha):
+                                raise ValueError("final QA report is not bound to the exact submitted combined SHA")
+                            if not draft_report_mode and not _final_validation_evidence_passed(
+                                    str(qa_tests), prepared["combined_revision"]):
+                                raise ValueError("final QA submission lacks passing evidence for the exact combined SHA")
+                            if draft_report_mode and (verdict not in {"approve", "reject"}
+                                    or (not held_final_qa and qa_review.get("status_to") != qa_row_status)
+                                    or qa_submission.get("submitted_by_principal_id")
+                                       == qa_review.get("reviewed_by_principal_id")):
+                                raise ValueError("draft delivery requires the latest exact independent QA verdict")
+                            delivery_runtime, compiled_delivery = await self._workflow_delivery_runtime(project)
+                            qa_ticket = dict(final_row)
+                            qa_ticket["project"] = project.name
+                            qa_ticket["workflow_delivery"] = dict(qa_payload["workflow_delivery"])
+                            qa_ticket["latest_submission"] = qa_submission
+                            qa_ticket["latest_verdict"] = qa_review
+                            draft_report = None
+                            if draft_report_mode:
+                                report_text = str(qa_tests or "")
+                                def report_section(label):
+                                    rows = [line.strip() for line in report_text.splitlines()
+                                            if _re.match(rf"^\s*{_re.escape(label)}\s*:", line, _re.I)]
+                                    return "\n".join(rows) or f"{label.replace('_', ' ').capitalize()}: not separately reported in the exact QA record."
+                                draft_report = {
+                                    "report_reference": f"Central ticket {final_id}; exact combined revision {qa_sha}",
+                                    "test_build_summary": str(qa_tests or "No test/build summary was submitted."),
+                                    "full_failure_baseline": report_section("full_failure_baseline"),
+                                    "advisories": "; ".join(
+                                        f"{row['ticket_id']}: {row.get('baseline_failures', 'not reported')}"
+                                        for row in members),
+                                }
+                            publish = await publish_workflow_delivery(
+                                delivery_runtime, compiled_delivery, delivery_workflow,
+                                qa_ticket, prepared,
+                                final_validation_delivery=final_validation_delivery,
+                                report=draft_report)
+                            settled_source_members = self._settle_workflow_source_delivery(
+                                project.name, board_id, members, final_id, prepared, publish,
+                                delivery_runtime, compiled_delivery)
+                            if asyncio.iscoroutine(settled_source_members):
+                                settled_source_members = await settled_source_members
+                            actions.append({"kind": "workflow_delivery_published",
+                                            "project": project.name, "ticket_id": final_id,
+                                            "result": publish,
+                                            "source_members_settled": settled_source_members})
+            except (ValueError, OSError, subprocess.SubprocessError, BoardClientError,
+                    ConnectorError, ImportError) as exc:
+                actions.append({"kind": "workflow_blocked", "project": getattr(project, "name", "unknown"),
+                                "reason": type(exc).__name__, "detail": str(exc)[:1_500]})
+            except Exception as exc:
+                # A transport/runtime failure is scoped to this project. Do not
+                # prevent unrelated active registered projects from reconciling.
+                actions.append({"kind": "workflow_blocked", "project": getattr(project, "name", "unknown"),
+                                "reason": type(exc).__name__, "detail": str(exc)[:1_500]})
+        return actions
+
+    async def _technical_recovery_workspace_evidence(
+        self, registry: Mapping[str, Any], context: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Read only the exact ticket workspace bound by the current Central registry."""
+        facts_api = _TECHNICAL_RECOVERY_MODULE._WORKSPACE_EVIDENCE_MODULE
+        ticket = context.get("ticket")
+        if not isinstance(ticket, Mapping):
+            return facts_api.context_facts({"status": "unverified", "error_class": "TicketUnavailable"})
+        facts = await asyncio.to_thread(
+            facts_api.project_workspace_evidence, registry=registry,
+            board_id=str(context.get("board_id", "")),
+            project_id=str(context.get("project_id", "")), ticket=ticket)
+        return facts_api.context_facts(facts)
+
+    async def _technical_recovery_authorized(self, context: Mapping[str, Any]) -> bool:
+        """Honor both configured and persisted kill switches at mutation time."""
+        document = await self.coordinator_config()
+        async with self._client_for_board(context["board_id"]) as client:
+            raw = await client.board_state_get(STATE_KEY)
+        state = raw.get("state") if isinstance(raw, Mapping) else None
+        value = state.get("value") if isinstance(state, Mapping) else None
+        saved = json.loads(value) if isinstance(value, str) else {}
+        config = resolve_config(document, self.args, saved, utc_now(), project_name=context["project_id"])
+        return not config.kill_switch
+
+    async def _technical_recovery_provider_contract(self, context: Mapping[str, Any]) -> dict[str, str]:
+        """Return only semantic provider identity used to invalidate stale decisions."""
+        document = await self.coordinator_config()
+        config = resolve_config(document, self.args, {}, utc_now(), project_name=context["project_id"])
+        runtime = resolve_provider_runtime(config, "drafting", getattr(self.args, "provider_secrets_dir", None))
+        if runtime is None or runtime.draft_protocol != "openai_chat_completions_v1":
+            raise ButlerConfigError("technical recovery needs a configured chat provider")
+        return {"contract": _TECHNICAL_RECOVERY_MODULE.RECOVERY_DECISION_CONTRACT_VERSION,
+                "model": runtime.model, "protocol": runtime.draft_protocol}
+
+    async def _technical_recovery_choose(self, context: Mapping[str, Any]) -> dict[str, Any]:
+        """Use the existing approved drafting transport for one selected hold."""
+        document = await self.coordinator_config()
+        config = resolve_config(document, self.args, {}, utc_now(), project_name=context["project_id"])
+        if config.kill_switch:
+            raise ButlerConfigError("technical recovery is disabled by kill switch")
+        runtime = resolve_provider_runtime(config, "drafting", getattr(self.args, "provider_secrets_dir", None))
+        if runtime is None or runtime.draft_protocol != "openai_chat_completions_v1":
+            raise ButlerConfigError("technical recovery needs a configured chat provider")
+        prompt = json.dumps(context, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        if len(prompt.encode("utf-8")) > 18_000:
+            raise ValueError("technical recovery context exceeded bound")
+        body = json.dumps({"model": runtime.model, "messages": [
+            {"role": "system", "content": _TECHNICAL_RECOVERY_MODULE.SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}], "max_tokens": 2048,
+            "reasoning_effort": "low",
+            "response_format": {"type": "json_object"}}).encode()
+        response = await _post_provider_json(runtime, body, timeout_s=20, max_response_bytes=32_000)
+        text = _openai_chat_draft_text(response)
+        metadata = _TECHNICAL_RECOVERY_MODULE.provider_response_metadata(response, text)
+        choices = response.get("choices") if isinstance(response, Mapping) else None
+        finish_reason = (choices[0].get("finish_reason")
+                         if isinstance(choices, list) and choices and isinstance(choices[0], Mapping)
+                         else None)
+        if finish_reason == "length":
+            metadata["outcome"] = "length"
+            raise _TECHNICAL_RECOVERY_MODULE.RecoveryProviderError(
+                "technical recovery response reached output limit", metadata)
+        if text is None or not text:
+            metadata["outcome"] = "empty"
+            raise _TECHNICAL_RECOVERY_MODULE.RecoveryProviderError(
+                "technical recovery response is empty", metadata)
+        if runtime.credential and runtime.credential in text:
+            metadata["outcome"] = "invalid_content"
+            raise _TECHNICAL_RECOVERY_MODULE.RecoveryProviderError(
+                "technical recovery response is invalid", metadata)
+        try:
+            return _TECHNICAL_RECOVERY_MODULE.validate_recovery_recommendation(text, context=context)
+        except Exception as exc:
+            metadata["outcome"] = "contract_invalid"
+            raise _TECHNICAL_RECOVERY_MODULE.RecoveryProviderError(
+                "technical recovery response failed contract validation", metadata) from exc
+
     async def refresh_registry_findings(self, now: datetime) -> dict[str, Any]:
         """Act only on opted-in boards, then run coordinator's real derivation."""
         self._registry_failures = {}
         coordinator = self._coordinator_api()
+        registry_error: Exception | None = None
         async with coordinator["RawReader"](self.args.url, self.token) as reader:
             projects, snapshots, previous = await coordinator["read_cycle"](
                 reader, self.args.home_board
             )
+            try:
+                # read_cycle consumes project_registry to build Project rows but
+                # returns previous state keyed by board ID only; it does not
+                # preserve the authoritative raw routing/activation document.
+                raw_registry = await reader.call(
+                    "board_state_get", self.args.home_board, key="project_registry"
+                )
+                self._workflow_registry = self._validated_workflow_registry(raw_registry, projects)
+            except Exception as exc:
+                registry_error = exc
+                self._workflow_registry = None
+        self._workflow_registry_error = registry_error
+        if registry_error is not None:
+            for board_id in {getattr(project, "board_id", "unknown") for project in projects}:
+                self._record_registry_failure(
+                    board_id, "project_registry", "authoritative_registry_unavailable"
+                )
+        if self.source_intake_poller is not None:
+            self.source_intake_poller.workflow_owned = self._source_ticket_workflow_owned
         self._source_registry_projects = {
             project.name: project.board_id
             for project in projects
             if isinstance(getattr(project, "name", None), str)
         }
+        self._source_projection_complete = all(
+            fleet_projection_error(snapshot) is None for snapshot in snapshots.values()
+        )
         self._source_board_load = {
             board_id: source_intake_board_load(snapshot, now)
             for board_id, snapshot in snapshots.items()
         }
         self._source_fleet_load = source_intake_fleet_load(snapshots, now)
-        project_onboarding = await self._auto_onboard_unknown_projects(previous, now)
-        active_boards = {project.board_id for project in projects}
+        project_onboarding = (
+            await self._auto_onboard_unknown_projects(previous, now)
+            if self._source_projection_complete
+            else {"status": "blocked", "reason_code": "fleet_snapshot_incomplete"}
+        )
+        unavailable_boards = {
+            board_id for board_id, snapshot in snapshots.items()
+            if snapshot.get("snapshot_error_class")
+        }
+        for board_id in sorted(unavailable_boards):
+            self._record_registry_failure(
+                board_id, "registry_admission", "board_snapshot_unavailable"
+            )
+        active_boards = {project.board_id for project in projects} - unavailable_boards
         self._harvest_approval_scan(sorted(active_boards))
         source_intake = self._schedule_source_intake_refresh(now)
         fleet = await self._reconcile_fleet(
@@ -15311,8 +16668,16 @@ class CentralBackend:
             if getattr(self.args, "runtime_mode", "shadow") == "active"
             else set()
         )
-        acting_boards = configured & active_boards
+        acting_boards = acting_registry_boards(self.args, active_boards)
+        incomplete_boards = {
+            board for board in acting_boards
+            if fleet_projection_error(snapshots.get(board)) is not None
+        }
+        for board in sorted(incomplete_boards):
+            self._record_registry_failure(board, "projection", "operational_snapshot_incomplete")
+        acting_boards -= incomplete_boards
         actions: list[MechanicalAction] = []
+        workflow_actions_all: list[dict[str, Any]] = []
         if not self.args.dry_run:
             for board_id in sorted(acting_boards):
                 snapshot = snapshots[board_id]
@@ -15324,12 +16689,35 @@ class CentralBackend:
                     for row in tickets
                     if isinstance(row, Mapping) and row.get("ticket_id")
                 ]
+                # A versioned project workflow is a sealed cohort manifest;
+                # hydrate every declared member even when it is closed or no
+                # longer present in the bounded active-ticket projection.
+                for project in projects:
+                    workflow = getattr(project, "butler_workflow", None)
+                    if project.board_id == board_id and isinstance(workflow, Mapping):
+                        for node in workflow.get("nodes", []):
+                            if isinstance(node, Mapping) and isinstance(node.get("ticket_id"), str):
+                                ticket_ids.append(node["ticket_id"])
+                        try:
+                            from pursers_client.project_workflow import parse_project_workflow
+                            parsed = parse_project_workflow(
+                                workflow, project_id=project.name, board_id=board_id
+                            )
+                            from pursers_client.project_workflow import final_validation_ticket_id
+                            ticket_ids.append(final_validation_ticket_id(parsed))
+                        except (ImportError, ValueError, TypeError):
+                            pass
                 for finding in previous.get(board_id, {}).get("findings", []):
                     if isinstance(finding, Mapping) and finding.get("ticket_id"):
                         ticket_ids.append(str(finding["ticket_id"]))
                 full_tickets = await self._full_tickets_for_board(
                     board_id, ticket_ids
                 )
+                workflow_actions = await self._reconcile_project_workflows(
+                    board_id, projects, full_tickets,
+                    registry=getattr(self, "_workflow_registry", None),
+                )
+                workflow_actions_all.extend(workflow_actions)
                 board_actions = plan_mechanical_actions(
                     board_id,
                     snapshot,
@@ -15386,11 +16774,13 @@ class CentralBackend:
                     board_id, observations[board_id], now
                 )
         approval_scan = self._schedule_approval_scan(sorted(active_boards), now)
+        technical_supervision = self._technical_supervisor.status
         return {
             "active_boards": sorted(active_boards),
             "acting_boards": sorted(acting_boards),
             "ignored_acting_boards": sorted(configured - active_boards),
-            "actions": [action.kind for action in actions],
+            "actions": [action.kind for action in actions]
+            + [action["kind"] for action in workflow_actions_all],
             "observations": {
                 board_id: {
                     "findings": len(observations[board_id]),
@@ -15404,6 +16794,7 @@ class CentralBackend:
             "project_onboarding": project_onboarding,
             "source_intake": source_intake,
             "approval_scan": approval_scan,
+            "technical_supervision": technical_supervision,
             "board_failures": {
                 board_id: list(rows)
                 for board_id, rows in sorted(self._registry_failures.items())
@@ -16312,6 +17703,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--act-on-registry",
+        action="store_true",
+        help=(
+            "explicitly opt all current and future active registry boards into "
+            "the two mechanical actions; requires active runtime authorization"
+        ),
+    )
+    parser.add_argument(
         "--no-live-candidates-cycles",
         type=int,
         default=DEFAULT_NO_LIVE_CANDIDATES_CYCLES,
@@ -16410,15 +17809,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         args.active_action = list(MECHANICAL_ACTION_CLASSES)
     if any(not value.strip() for value in args.act_on_board):
         parser.error("--act-on-board values must be non-empty")
-    if args.runtime_mode == "shadow" and args.act_on_board:
-        parser.error("--act-on-board requires --runtime-mode active")
+    if args.runtime_mode == "shadow" and (args.act_on_board or args.act_on_registry):
+        parser.error("--act-on-board/--act-on-registry requires --runtime-mode active")
     if args.runtime_mode == "shadow" and args.active_authorization_file is not None:
         parser.error("--active-authorization-file requires --runtime-mode active")
     if args.runtime_mode == "active":
         if args.dry_run:
             parser.error("active runtime mode cannot be combined with --dry-run")
-        if not args.act_on_board:
-            parser.error("active runtime mode requires at least one --act-on-board")
+        if not args.act_on_board and not args.act_on_registry:
+            parser.error("active runtime mode requires --act-on-board or --act-on-registry")
         if args.active_authorization_file is None:
             parser.error("active runtime mode requires --active-authorization-file")
         try:

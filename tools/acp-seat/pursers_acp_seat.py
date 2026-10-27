@@ -304,13 +304,27 @@ def _executable_read_roots(executable: str) -> set[Path]:
 
 
 def _ancestor_metadata_roots(paths: Iterable[Path]) -> set[Path]:
-    """Return ancestors needed to traverse lexical and real path chains."""
+    """Traverse path and symlink ancestors without exposing sibling contents."""
     ancestors: set[Path] = set()
-    for path in paths:
-        lexical = Path(os.path.abspath(os.path.expanduser(path)))
+    pending = [Path(os.path.abspath(os.path.expanduser(path))) for path in paths]
+    visited: set[Path] = set()
+    while pending:
+        lexical = pending.pop()
+        if lexical in visited:
+            continue
+        visited.add(lexical)
         real = Path(os.path.realpath(lexical))
         ancestors.update(lexical.parents)
         ancestors.update(real.parents)
+        # A virtualenv can reach its interpreter through another installation
+        # alias. The final real path alone omits those intermediate ancestors.
+        for candidate in (lexical, *lexical.parents):
+            try:
+                target = candidate.readlink()
+            except OSError:
+                continue
+            ancestors.add(candidate)
+            pending.append(Path(os.path.abspath(candidate.parent / target)))
     return ancestors
 
 

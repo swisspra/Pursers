@@ -29,6 +29,29 @@ description: Execute a Pursers work ticket after a valid offer. Use for claiming
 10. Release the work slot after successful submission. Independent review is a
     separate principal's job.
 
+## Continue authorized work without a permission loop
+
+An active offer authorizes the ticket's existing scope, including fixing its
+owned compiler, test, lint and format defects, preserving the checkpoint,
+committing, pushing the ticket branch and submitting truthful evidence. These
+ordinary steps do not require a new human approval. Keep the baseline, dependency
+and source identities exact; an old diagnostic assembly is not new acceptance.
+
+If the target and affected checks pass while unrelated baseline findings are
+unchanged, disclose both results and submit for independent scoped review when
+the ticket authorizes staged acceptance. Do not claim the whole project passed.
+If owned defects remain, fix and retest them rather than submit an incomplete
+candidate or request permission to repair them. Final combined QA stays strict.
+
+For a technical blocker such as missing registered workspace context, use the
+ticket's configured information-question channel with the exact error and
+inspected references. In an autonomous project the authorized Butler handles
+routine technical answers; otherwise use the configured coordination owner.
+Preserve the lease and partial work while
+the supported runtime permits continuation. Do not guess a checkout or borrow
+credentials. Use a human hold for a genuinely unavailable domain/authority
+decision or exhausted recovery without new progress, not a routine next step.
+
 For detailed evidence and recovery cases, read
 [evidence and recovery](references/evidence-and-recovery.md). For the full fleet
 workflow, use the canonical
