@@ -109,7 +109,7 @@
   function projectCard(central, board) {
     const counts = board.counts || {};
     const pending = board.status === 'pending' || !board.counts;
-    const total = Object.values(counts).reduce((sum, value) => sum + numberCount(value), 0);
+    const total = pending ? null : Object.values(counts).reduce((sum, value) => sum + numberCount(value), 0);
     const active = sumStates(counts, ACTIVE_STATES);
     const review = sumStates(counts, REVIEW_STATES);
     const open = numberCount(counts.open);
@@ -132,7 +132,7 @@
       </dl>
       <details class="projects-records" data-project-records data-state-key="${esc(`project-records:${central}:${board.board_id}`)}">
         <summary>Project identifiers, ticket details, and all reported states</summary>
-        <p class="projects-identifiers">Central: <code>${esc(central)}</code> · Board ID: <code>${esc(board.board_id)}</code> · ${pending ? 'Summary pending' : `${esc(total)} ticket states counted in the Fleet summary.`}</p>
+        <p class="projects-identifiers">Central: <code>${esc(central)}</code> · Board ID: <code>${esc(board.board_id)}</code> · ${pending ? 'Summary pending; ticket total unknown.' : `${esc(total)} ticket states counted in the Fleet summary.`}</p>
         <div class="counts projects-state-list">${pending ? '<span>Summary pending</span>' : statePills(counts)}</div>
         <div data-ag-ui-observation>${ticketDetails(board.tickets || [], legacyCoverage(board))}</div>
       </details>
@@ -142,7 +142,7 @@
         <a class="button" href="${boardHref(central, board.board_id, 'routes')}">View routes</a>
         <details class="projects-more-actions"><summary>More actions</summary><button class="button projects-remove" type="button" data-project-remove="${esc(board.label)}" data-central="${esc(central)}">Remove from Fleet</button></details>
       </div>
-      ${error}<p class="projects-scope meta">${esc(total)} tickets in the Fleet summary.</p>
+      ${error}<p class="projects-scope meta">${pending ? 'Ticket total pending.' : `${esc(total)} tickets in the Fleet summary.`}</p>
     </article>`;
   }
 
@@ -510,6 +510,7 @@
     }
     // Ticket totals belong to boards, so shared-board projects count once here.
     const uniqueBoards = [...new Map(rows.map(row => [JSON.stringify([row.central, row.board.board_id]), row])).values()];
+    const summaryPending = uniqueBoards.some(({board}) => board.status === 'pending' || !board.counts);
     const groups = new Map();
     for (const {central, board} of rows) {
       const boards = groups.get(central) || [];
@@ -527,7 +528,8 @@
     const action = '<button class="primary-action projects-add" type="button" data-project-add-open>+ Add project</button>';
     const summary = rows.length ? `<section class="projects-summary" aria-label="Projects summary">
       <p><strong>${esc(rows.length)} ${rows.length === 1 ? 'project' : 'projects'}</strong> connected through <strong>${esc(groups.size)} ${groups.size === 1 ? 'Central connection' : 'Central connections'}</strong>.</p>
-      <dl><div><dt>In progress</dt><dd>${esc(active)}</dd></div><div><dt>Review ready</dt><dd>${esc(review)}</dd></div></dl>
+      ${summaryPending ? '<p class="meta">Work totals pending until every registered board has a readable summary.</p>' : ''}
+      <dl><div><dt>In progress</dt><dd>${summaryPending ? '—' : esc(active)}</dd></div><div><dt>Review ready</dt><dd>${summaryPending ? '—' : esc(review)}</dd></div></dl>
     </section>` : '';
     const content = rows.length
       ? [...groups.entries()].map(([central, boards]) => centralGroup(central, boards)).join('')

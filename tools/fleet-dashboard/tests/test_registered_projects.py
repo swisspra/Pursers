@@ -125,13 +125,28 @@ def test_projects_show_registered_entry_when_no_board_summary_is_readable():
     html = render_projects(
         {
             "default": {
-                "registered_projects": [{"name": "api", "board_id": "private"}],
-                "boards": [],
+                "registered_projects": [
+                    {"name": "api", "board_id": "private"},
+                    {"name": "worker", "board_id": "readable"},
+                ],
+                "boards": [
+                    {
+                        "board_id": "readable",
+                        "label": "wrong-board-label",
+                        "status": "ready",
+                        "counts": {"claimed": 3},
+                    }
+                ],
             }
         }
     )
-    assert "<h3>api</h3>" in html
+    assert "<h3>api</h3>" in html and "<h3>worker</h3>" in html
     assert "Summary pending" in html
+    assert "0 tickets in the Fleet summary" not in html
+    assert "3 tickets in the Fleet summary" in html
+    summary = html.split('<section class="projects-summary"', 1)[1].split("</section>", 1)[0]
+    assert "<dd>—</dd>" in summary
+    assert "<dd>0</dd>" not in summary
 
 
 def test_projects_distinguish_unavailable_registry_from_empty_registry():
