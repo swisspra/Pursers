@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 from .beta_blocking_fixture_server import _mcp_host_html
@@ -88,3 +90,17 @@ for (const row of rows) {
     ]
     subprocess.run(["node", "-e", script, str(adapter), json.dumps(rows)], check=True, capture_output=True, text=True)
     assert all("prs1." not in path.read_text() for path in FIXTURE_DIR.glob("*.json"))
+
+
+def test_fleet_dashboard_direct_entrypoint_loads_without_fleet_pythonpath() -> None:
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [sys.executable, str(REPO / "tools" / "fleet-dashboard" / "fleet_dashboard.py"), "--help"],
+        cwd=REPO,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "usage:" in result.stdout.lower()

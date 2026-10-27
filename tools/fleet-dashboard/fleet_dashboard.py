@@ -9,6 +9,7 @@ import copy
 import difflib
 import hashlib
 import hmac
+import importlib.util
 import ipaddress
 import json
 import os
@@ -36,7 +37,30 @@ from typing import Any, Protocol
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import tomllib
-import ag_ui
+
+
+def _load_ag_ui_sibling() -> Any:
+    """Load the observation helper beside this file for script and spec loaders."""
+    path = Path(__file__).resolve().with_name("ag_ui.py")
+    name = "_pursers_fleet_dashboard_ag_ui"
+    existing = sys.modules.get(name)
+    if existing is not None and Path(existing.__file__).resolve() == path:
+        return existing
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"unable to load Fleet AG-UI helper: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        if sys.modules.get(name) is module:
+            del sys.modules[name]
+        raise
+    return module
+
+
+ag_ui = _load_ag_ui_sibling()
 
 
 class FleetDashboardHTTPServer(ThreadingHTTPServer):

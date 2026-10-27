@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 import threading
 import urllib.error
@@ -28,6 +30,33 @@ assert DASHBOARD_SPEC and DASHBOARD_SPEC.loader
 dashboard = importlib.util.module_from_spec(DASHBOARD_SPEC)
 sys.modules[DASHBOARD_SPEC.name] = dashboard
 DASHBOARD_SPEC.loader.exec_module(dashboard)
+
+
+def test_dashboard_file_loader_imports_sibling_ag_ui_without_fleet_path() -> None:
+    dashboard_path = FLEET_DIR / "fleet_dashboard.py"
+    script = """
+import importlib.util
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("fixture_fleet_dashboard", path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+print(Path(module.ag_ui.__file__).resolve())
+"""
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(dashboard_path)],
+        cwd=Path(__file__).parents[3],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert Path(result.stdout.strip()) == dashboard_path.with_name("ag_ui.py").resolve()
 
 
 HELD_DRAFT = {
