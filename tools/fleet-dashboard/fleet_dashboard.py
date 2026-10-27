@@ -504,6 +504,7 @@ class FleetClient(Protocol):
         cursor: int | None = None,
         limit: int = 100,
         ack: bool = True,
+        touch: bool | None = None,
         agent_name: str | None = None,
         max_events: int | None = None,
         max_bytes: int | None = None,
@@ -5293,6 +5294,7 @@ class FleetFetcher:
             cursor=max(0, latest_seq - event_limit),
             limit=event_limit,
             ack=False,
+            touch=False,
             max_events=event_limit,
             max_bytes=EVENT_MAX_BYTES,
         )

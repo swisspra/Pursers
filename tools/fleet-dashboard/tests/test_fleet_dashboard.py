@@ -3356,6 +3356,7 @@ def test_fetch_board_uses_bounded_snapshot_and_catchup() -> None:
             "cursor": 0,
             "limit": 100,
             "ack": False,
+            "touch": False,
             "max_events": 100,
             "max_bytes": 100_000,
         },
@@ -3364,6 +3365,106 @@ def test_fetch_board_uses_bounded_snapshot_and_catchup() -> None:
         "memory_read",
         {"memory_type": "handoff", "limit": dashboard.MAX_HANDOFF_MEMORIES},
     ) in calls
+
+
+def test_stale_owned_dashboard_event_read_is_passive() -> None:
+    class StaleOwnedClient:
+        def __init__(self) -> None:
+            self.lifecycle_status = "stale"
+            self.last_activity_at = "2026-10-09T15:48:08+00:00"
+            self.acknowledged_cursor = 17
+            self.leases = {"TK-existing": "AI-existing"}
+            self.board_state = {"revision": 4}
+            self.calls: list[dict[str, object]] = []
+
+        async def board_catchup(
+            self,
+            *,
+            cursor: int | None = None,
+            limit: int = 100,
+            ack: bool = True,
+            touch: bool = True,
+            max_events: int | None = None,
+            max_bytes: int | None = None,
+        ) -> dict:
+            self.calls.append(
+                {
+                    "cursor": cursor,
+                    "limit": limit,
+                    "ack": ack,
+                    "touch": touch,
+                    "max_events": max_events,
+                    "max_bytes": max_bytes,
+                }
+            )
+            if touch:
+                raise dashboard.BoardClientError(
+                    "agent is not active; call board_onboard or board_join before more work"
+                )
+            return {
+                "events": [],
+                "latest_seq": 17,
+                "has_more": False,
+                "resync_required": False,
+                "touched": False,
+            }
+
+    async def exercise() -> None:
+        client = StaleOwnedClient()
+        before = (
+            client.lifecycle_status,
+            client.last_activity_at,
+            client.acknowledged_cursor,
+            dict(client.leases),
+            dict(client.board_state),
+        )
+
+        feed = await dashboard.FleetFetcher._board_event_feed(
+            object(), client, latest_seq=17
+        )
+
+        assert feed == {"events": [], "resync_required": False, "truncated": False}
+        assert client.calls == [
+            {
+                "cursor": 0,
+                "limit": 50,
+                "ack": False,
+                "touch": False,
+                "max_events": 50,
+                "max_bytes": 100_000,
+            }
+        ]
+        assert (
+            client.lifecycle_status,
+            client.last_activity_at,
+            client.acknowledged_cursor,
+            client.leases,
+            client.board_state,
+        ) == before
+
+    asyncio.run(exercise())
+
+
+def test_event_feed_refuses_client_without_explicit_touch_support() -> None:
+    class LegacyClient:
+        async def board_catchup(
+            self,
+            *,
+            cursor: int | None = None,
+            limit: int = 100,
+            ack: bool = True,
+            max_events: int | None = None,
+            max_bytes: int | None = None,
+        ) -> dict:
+            raise AssertionError("unsupported legacy call must not be retried")
+
+    async def exercise() -> None:
+        with pytest.raises(TypeError, match="touch"):
+            await dashboard.FleetFetcher._board_event_feed(
+                object(), LegacyClient(), latest_seq=1
+            )
+
+    asyncio.run(exercise())
 
 
 def test_readable_unjoined_board_agents_use_dispatch_activity_window() -> None:

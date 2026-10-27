@@ -42,6 +42,29 @@ def test_memory_write_preserves_typed_scrub_rejection() -> None:
     asyncio.run(exercise())
 
 
+def test_board_catchup_forwards_explicit_touch_and_preserves_omitted_default() -> None:
+    async def exercise() -> None:
+        board = BoardClient(
+            "http://central.invalid/mcp", "TOKEN_PLACEHOLDER", "pursers"
+        )
+        calls: list[dict] = []
+
+        async def capture(_name, arguments):
+            calls.append(dict(arguments))
+            return {"events": []}
+
+        board._call = capture  # type: ignore[method-assign]
+
+        await board.board_catchup(ack=False, touch=False)
+        await board.board_catchup()
+
+        assert calls[0]["ack"] is False
+        assert calls[0]["touch"] is False
+        assert "touch" not in calls[1]
+
+    asyncio.run(exercise())
+
+
 def test_holder_wait_contract_uses_only_central_emitted_kinds() -> None:
     assert HELD_TICKET_KINDS == {
         "ticket_annotated",

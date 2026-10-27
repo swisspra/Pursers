@@ -475,6 +475,10 @@ not reveal or delete bearer tokens already issued through another principal.
 Fleet and the open board detail refresh every five seconds. The server also
 caches its Central snapshot for up to five seconds, so two quick reads may show
 the same generation. Long Config jobs have their own one-second progress poll.
+Detail event catchup is a passive read: it does not touch member activity or
+acknowledge a consumer cursor. An admitted but stale dashboard identity can
+therefore read board detail without being reactivated or changing member or
+lease state. This does not restore work capability or change membership.
 
 When a refresh fails, the last successful snapshot remains visible and a
 connection banner reports the affected source, last success, error class, and
