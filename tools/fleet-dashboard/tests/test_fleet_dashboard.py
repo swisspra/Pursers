@@ -679,7 +679,7 @@ const context = {{
   pageHead:(kicker,title,copy,action='')=>`<header><b>${{esc(kicker)}}</b><h2>${{esc(title)}}</h2><p>${{esc(copy)}}</p>${{action}}</header>`,
   warmTruthStrip:()=>'<div class="truth-strip"></div>',
   warmBoards:()=>boards,
-  centralLabels:['central-a','central-b'],fleetData:{{'central-a':{{}},'central-b':{{}}}},
+  centralLabels:['central-a','central-b'],fleetData:{{'central-a':{{generated_at:'2030-01-02',boards:[],refresh:{{complete:true}}}},'central-b':{{generated_at:'2030-01-02',boards:[],refresh:{{complete:true}}}}}},
   numberCount:value=>Number(String(value??0).replace('>=',''))||0,
   boardHref:(central,board,tab='summary')=>`#/${{central}}/${{board}}/${{tab}}`,
 }};

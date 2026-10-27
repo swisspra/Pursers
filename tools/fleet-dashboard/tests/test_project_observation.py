@@ -58,31 +58,40 @@ globalThis.document = {{querySelector: selector => selector === '#state' ? dashb
 eval({json.dumps(registry)});
 eval({json.dumps(projects)});
 const escape = value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;');
-const render = (fleetData, tickets = []) => FleetViewModules.render('projects', {{
+const render = (fleetData, tickets = [], centrals = ['fixture']) => FleetViewModules.render('projects', {{
   esc: escape, pageHead: () => '', warmTruthStrip: () => '', numberCount: Number,
-  boardHref: () => '#/board', centralLabels: ['fixture'], fleetData,
+  boardHref: () => '#/board', centralLabels: centrals, fleetData,
   warmBoards: () => tickets.length ? [{{central: 'fixture', board: {{
     label: 'Demo', board_id: 'demo-board', status: 'ready', counts: {{}}, tickets,
   }}}}] : [],
 }});
-const unavailable = render({{}});
+const unavailable = render({{}}, [], ['fixture']);
 dashboardState.textContent = 'Connecting to centrals…';
-const loading = render({{}});
+const loading = render({{}}, [], ['fixture']);
+const zeroCentrals = render({{default: {{generated_at: '2030-01-02', boards: []}}}}, [], []);
+const missingCompletion = render({{fixture: {{generated_at: '2030-01-02', boards: []}}}}, [], ['fixture']);
+const completionWithoutSnapshot = render({{fixture: {{refresh: {{complete: true}}}}}}, [], ['fixture']);
 dashboardState.textContent = 'Updated 2030-01-02';
-const confirmedEmpty = render({{fixture: {{boards: []}}}});
-const draft = render({{fixture: {{boards: []}}}}, [{{
+const confirmedEmpty = render({{fixture: {{generated_at: '2030-01-02', boards: [], refresh: {{complete: true}}}}}}, [], ['fixture']);
+const draft = render({{fixture: {{generated_at: '2030-01-02', boards: [], refresh: {{complete: true}}}}}}, [{{
   id: 'TK-draft', title: 'Draft', status: 'closed', status_label: 'Approved · delivery pending',
   activity: {{stage: 'delivery', state: 'blocked', next_action: 'Complete final QA', blocking_reason: 'QA held; security pending', evidence_refs: ['ticket://demo/evidence']}},
   result: {{state: 'approved', review: {{verdict: 'approve', independent: true}}}},
   delivery: {{state: 'integration_merged'}},
 }}, {{id: 'TK-unknown', title: 'Unknown evidence', status: 'closed', delivery: {{state: 'integration_merged'}}}}]);
-console.log(JSON.stringify({{unavailable, loading, confirmedEmpty, draft}}));
+console.log(JSON.stringify({{unavailable, loading, zeroCentrals, missingCompletion, completionWithoutSnapshot, confirmedEmpty, draft}}));
 """
     rendered = json.loads(_node(program))
     assert "Central connection unavailable" in rendered["unavailable"]
     assert "Connect your first project" not in rendered["unavailable"]
     assert "Checking Central connection" in rendered["loading"]
     assert "Connect your first project" not in rendered["loading"]
+    assert "Checking Central connection" in rendered["zeroCentrals"]
+    assert "Connect your first project" not in rendered["zeroCentrals"]
+    assert "Checking Central connection" in rendered["missingCompletion"]
+    assert "Connect your first project" not in rendered["missingCompletion"]
+    assert "Checking Central connection" in rendered["completionWithoutSnapshot"]
+    assert "Connect your first project" not in rendered["completionWithoutSnapshot"]
     assert "Connect your first project" in rendered["confirmedEmpty"]
     assert "Current stage" in rendered["draft"]
     assert "Complete final QA" in rendered["draft"]

@@ -25,8 +25,7 @@
 
   function useContext(context) {
     ({esc, pageHead, warmTruthStrip, warmBoards, numberCount, boardHref, centralLabels, fleetData, refreshCentral} = context);
-    centralLabels = centralLabels || [...new Set(warmBoards().map(row => row.central))];
-    if (!centralLabels.length) centralLabels = ['default'];
+    centralLabels = Array.isArray(centralLabels) ? centralLabels : [...new Set(warmBoards().map(row => row.central))];
   }
 
   function sumStates(counts, states) {
@@ -157,10 +156,13 @@
 
   function dashboardSourceState() {
     const text = typeof document !== 'undefined' ? document.querySelector('#state')?.textContent || '' : '';
-    if (/source unavailable/i.test(text)) return 'unavailable';
-    const missing = centralLabels.some(label => !fleetData?.[label] || fleetData[label].refresh?.complete === false);
-    if (!missing) return 'ready';
     const banner = typeof document !== 'undefined' ? document.querySelector('#connection-banner') : null;
+    if (/source unavailable/i.test(text)) return 'unavailable';
+    const allSourceBacked = centralLabels.length > 0 && centralLabels.every(label => {
+      const data = fleetData?.[label];
+      return Boolean(data && typeof data.generated_at === 'string' && Array.isArray(data.boards) && data.refresh?.complete === true);
+    });
+    if (allSourceBacked && (!banner || banner.hidden)) return 'ready';
     return banner && !banner.hidden ? 'unavailable' : 'loading';
   }
 
@@ -426,7 +428,7 @@
       form.elements[name].addEventListener('input', () => saveDraft());
       form.elements[name].addEventListener('change', () => saveDraft());
     }
-    loadDelivery(central);
+    if (central) loadDelivery(central);
     const rerenderForLayerChange = () => {
       delete form.dataset.dirty;
       form.querySelector(':focus')?.blur();
