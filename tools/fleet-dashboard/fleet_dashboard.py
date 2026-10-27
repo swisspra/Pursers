@@ -36,6 +36,7 @@ from typing import Any, Protocol
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import tomllib
+import ag_ui
 
 
 class FleetDashboardHTTPServer(ThreadingHTTPServer):
@@ -8331,6 +8332,18 @@ class TimedCache:
                 }
             return value
 
+    def peek(self) -> dict[str, Any] | None:
+        """Return an already-loaded value without refresh, loader, or thread work."""
+        with self._lock:
+            if self._value is None:
+                return None
+            age = max(0.0, time.monotonic() - self._loaded_at)
+            return {
+                "value": self._value,
+                "age_seconds": age,
+                "fresh": age < self.ttl_seconds,
+            }
+
 
 class SeatConfigManager:
     """Secret-safe orchestration layer for the dashboard Config page."""
@@ -10197,6 +10210,61 @@ class DashboardCache:
                     self._details.pop(key, None)
             raise
 
+    def get_cached_board(
+        self, board_id: str, central: str | None = None
+    ) -> dict[str, Any] | None:
+        """Peek at loaded detail or fleet summary without joining Central."""
+        label = self.resolve_central(central)
+        key = (label, board_id)
+        with self._detail_lock:
+            cache = self._details.get(key)
+        cached = cache.peek() if cache is not None else None
+        if cached is not None and isinstance(cached.get("value"), dict):
+            return {
+                "value": self._labeled(cached["value"], label),
+                "age_seconds": cached["age_seconds"],
+                "fresh": cached["fresh"],
+                "source": "board_detail",
+            }
+
+        summary = self._fleets[label].peek()
+        if summary is None or not isinstance(summary.get("value"), dict):
+            return None
+        fleet = summary["value"]
+        boards = fleet.get("boards")
+        board = next(
+            (
+                row
+                for row in boards
+                if isinstance(row, dict) and row.get("board_id") == board_id
+            ),
+            None,
+        ) if isinstance(boards, list) else None
+        if not isinstance(board, dict) or board.get("status") != "ready":
+            return None
+        tickets = board.get("tickets")
+        tickets = tickets if isinstance(tickets, list) else []
+        return {
+            "value": {
+                "board": {"board_id": board_id, "label": board.get("label")},
+                "tickets": tickets,
+                "ticket_total": None,
+                "ticket_returned": len(tickets),
+                "ticket_omitted": None,
+                "truncated": board.get("truncated"),
+                "snapshot_truncation": board.get("snapshot_truncation"),
+                "event_window_truncated": None,
+                "event_resync_required": None,
+                "coordinator_findings_stale": board.get(
+                    "coordinator_findings_stale"
+                ),
+                "source_coverage": board.get("coverage"),
+            },
+            "age_seconds": summary["age_seconds"],
+            "fresh": summary["fresh"],
+            "source": "fleet_summary",
+        }
+
     def get_config(self, central: str | None = None) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
@@ -10999,6 +11067,23 @@ def make_handler(
         def do_GET(self) -> None:
             route = urlsplit(self.path).path
             self._prepare_evidence("GET", route)
+            if route == "/api/ag-ui/capabilities":
+                try:
+                    central = requested_central(self.path)
+                    central_label(central)
+                except (KeyError, ValueError):
+                    self._send(
+                        404,
+                        "application/json; charset=utf-8",
+                        b'{"error":"central not found"}',
+                    )
+                    return
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    _json_bytes(ag_ui.capabilities()),
+                )
+                return
             if route == "/":
                 self._send(200, "text/html; charset=utf-8", HTML_SHELL.encode("utf-8"))
                 return
@@ -11483,6 +11568,7 @@ def make_handler(
                 "/api/projects/add",
                 "/api/lifecycle/plan",
                 "/api/lifecycle/apply",
+                "/api/ag-ui/observe",
             }
             worker_action = re.fullmatch(
                 r"/api/workers/([a-z0-9-]{2,32})/(test|start|stop|restart)", route
@@ -11515,6 +11601,98 @@ def make_handler(
                     status, body = guard_error
                     self._send(status, "application/json; charset=utf-8", body)
                     return
+            if route == "/api/ag-ui/observe":
+                try:
+                    central = requested_central(self.path)
+                    label = central_label(central)
+                    board_id = requested_board(self.path)
+                except ValueError as exc:
+                    self._send(
+                        400,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": str(exc)}),
+                    )
+                    return
+                except KeyError:
+                    self._send(
+                        404,
+                        "application/json; charset=utf-8",
+                        b'{"error":"central not found"}',
+                    )
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", ""))
+                except ValueError:
+                    length = -1
+                if not 1 <= length <= ag_ui.MAX_INPUT_BYTES:
+                    self._send(
+                        400,
+                        "application/json; charset=utf-8",
+                        b'{"error":"invalid body size"}',
+                    )
+                    return
+                try:
+                    raw_request = self.rfile.read(length)
+                    request = json.loads(raw_request)
+                    thread_id, run_id = ag_ui.validate_run_input(request)
+                except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                    self._send(
+                        400,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": str(exc) or "invalid RunAgentInput"}),
+                    )
+                    return
+                try:
+                    peek = getattr(cache, "get_cached_board", None)
+                    cached = (
+                        cache_call("get_cached_board", board_id, central=central)
+                        if callable(peek)
+                        else None
+                    )
+                    if cached is None:
+                        self._send(
+                            503,
+                            "application/json; charset=utf-8",
+                            b'{"error":"observation cache unavailable"}',
+                        )
+                        return
+                    snapshot = cached["value"]
+                except KeyError:
+                    self._send(
+                        404,
+                        "application/json; charset=utf-8",
+                        b'{"error":"board not found"}',
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001 - transport errors are not run events.
+                    self._send(
+                        503,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": type(exc).__name__}),
+                    )
+                    return
+                try:
+                    state = ag_ui.project_observation(
+                        snapshot,
+                        central=label,
+                        board_id=board_id,
+                        cache_age_seconds=cached.get("age_seconds"),
+                        cache_fresh=cached.get("fresh"),
+                        cache_source=cached.get("source"),
+                    )
+                    events = ag_ui.observation_events(
+                        state, thread_id=thread_id, run_id=run_id
+                    )
+                    body = ag_ui.encode_sse(events)
+                except ValueError as exc:
+                    self._send(
+                        413,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": str(exc)}),
+                    )
+                    return
+                self._send(200, "text/event-stream; charset=utf-8", body)
+                return
             try:
                 central = requested_central(self.path)
                 label = central_label(central)

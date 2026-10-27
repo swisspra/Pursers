@@ -14,6 +14,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   preserves existing roots, records resumable progress without credential
   contents, and reports service, board, and Fleet/harness readiness separately;
   service activation and host/MCP configuration remain deferred.
+- Add finite read-only AG-UI 1.0 capability and SSE observation routes backed
+  only by already-loaded bounded Fleet detail caches. Mutation, run, resume,
+  and live journal streaming remain unavailable or deferred.
 
 ## [5.2.1] - 2026-10-05
 

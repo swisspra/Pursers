@@ -482,6 +482,36 @@ recovery hint. Treat the banner as stale-data disclosure, not proof that the
 displayed state is current. The browser uses no-store requests; pressing reload
 does not turn an old server snapshot into new Central evidence.
 
+## AG-UI observation
+
+`GET /api/ag-ui/capabilities` reports the read-only HTTP/SSE snapshot support.
+`POST /api/ag-ui/observe?central=<label>&board_id=<id>` accepts AG-UI 1.0
+`RunAgentInput` with non-empty `threadId`, `runId`, and `messages: []`;
+`tools`, `context`, and `state` may be absent or empty. Non-empty messages,
+tools, context, or state and unsupported fields are rejected before any event
+stream opens. The request uses the same loopback, Host, Origin, and JSON checks
+as guarded Config actions.
+
+Observation only peeks at an already-loaded, bounded board-detail cache or
+Fleet board-summary cache. It
+does not trigger a cache refresh, create a Central client, join a board, call a
+model, renew a lease, or create work. A cold cache returns HTTP 503; a zero
+ticket count is reported only when present in the cached snapshot. The finite
+`text/event-stream` response contains `RUN_STARTED`, `STATE_SNAPSHOT`, zero or
+more `ACTIVITY_SNAPSHOT` events, and `RUN_FINISHED`. State includes the selected
+scope, cache age/freshness, bounded ticket summaries, source coverage flags,
+activity freshness, independent-review evidence, and distinct delivery
+states. Ticket histories, submission output, annotations, and Central
+credentials/configuration are excluded. Existing detail pages remain the path
+to full records and evidence.
+
+This is finite cached observation, not live journal streaming. Mutation,
+command, run, and resume capabilities are explicitly unavailable. Live journal
+push and mutation/resume adapters remain deferred until the autonomous harness
+is frozen. See the [AG-UI 1.0 specification](https://docs.ag-ui.com/spec/1.0),
+its [HTTP/SSE transport guidance](https://docs.ag-ui.com/basic/transports/http-sse),
+and the [RunAgentInput definition](https://docs.ag-ui.com/spec/1.0/basic/run-input).
+
 ## Board Butler
 
 Board Butler is one resident coordinator seat. For every active registry board
