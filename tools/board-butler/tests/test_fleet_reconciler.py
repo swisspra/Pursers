@@ -2277,6 +2277,98 @@ def test_production_cycle_fences_real_executor_client_after_policy_race(
 
 
 @pytest.mark.parametrize('worker_state', ['stopped', 'ready'])
+def test_tier_model_policy_routes_capacity_to_matching_inventory_without_starvation(worker_state: str) -> None:
+    policy = board_policy(
+        provider_maximums={"luna": 2, "deepseek": 1, "review": 1}
+    )
+    snapshots = {
+        "pursers": {
+            "agents": [],
+            "tickets": [{"ticket_id": "TK-tier1", "status": "open", "tier": 1}],
+            "dispatch_policy": {"worker_models_by_tier": {"1": ["deepseek-exact"]}},
+            "provider_maximums": {"luna": 2, "deepseek": 1, "review": 1},
+        }
+    }
+    product = butler.fleet_snapshot_from_products(
+        snapshots,
+        [],
+        {
+            "pursers": {
+                "luna": {"status": "healthy", "latency_ms": 10, "model": "luna-exact"},
+                "deepseek": {"status": "healthy", "latency_ms": 10, "model": "deepseek-exact"},
+                "review": {"status": "healthy", "latency_ms": 10, "model": "luna-exact"},
+            }
+        },
+        {"load_ratio": 0.1, "capacity_available": True, "executor_status": "healthy"},
+        NOW,
+    )
+    demand = product.demands["pursers"]
+    assert demand.work_pressure == 1
+    assert demand.provider_supports_open_work("deepseek")
+    assert not demand.provider_supports_open_work("luna")
+    current = snapshot({"pursers": demand}, [
+        seat("luna-live", "worker", provider="luna", lifecycle="ready"),
+        seat("deepseek-stopped", "worker", provider="deepseek", lifecycle="stopped"),
+        seat("luna-reviewer", "reviewer", provider="review", lifecycle="stopped"),
+    ])
+    plan = reconciler({"pursers": policy}).plan(current, {})
+    assert [(operation.action, operation.seat_id) for operation in plan.operations] == [
+        ("start", "deepseek-stopped")
+    ]
+    assert plan.provider_desired["pursers"]["deepseek"] == 1
+    assert plan.provider_desired["pursers"]["luna"] == 1
+
+    no_capacity = butler.fleet_snapshot_from_products(
+        snapshots,
+        [],
+        {"pursers": {
+            "luna": {"status": "healthy", "latency_ms": 10, "model": "luna-exact"},
+            "review": {"status": "healthy", "latency_ms": 10, "model": "luna-exact"},
+        }},
+        {"load_ratio": 0.1, "capacity_available": True, "executor_status": "healthy"},
+        NOW,
+    ).demands["pursers"]
+    assert no_capacity.unsupported_worker_model_tiers == ("1",)
+    assert no_capacity.work_pressure == 0
+
+
+def test_tier_model_policy_never_starts_faster_mismatching_stopped_worker() -> None:
+    policy = board_policy(provider_maximums={"luna": 2, "deepseek": 1, "review": 1})
+    product = butler.fleet_snapshot_from_products(
+        {
+            "pursers": {
+                "agents": [],
+                "tickets": [{"ticket_id": "TK-tier1", "status": "open", "tier": 1}],
+                "dispatch_policy": {"worker_models_by_tier": {"1": ["deepseek-exact"]}},
+                "provider_maximums": {"luna": 2, "deepseek": 1, "review": 1},
+            }
+        },
+        [],
+        {
+            "pursers": {
+                "luna": {"status": "healthy", "latency_ms": 1, "model": "luna-exact"},
+                "deepseek": {"status": "healthy", "latency_ms": 10, "model": "deepseek-exact"},
+                "review": {"status": "healthy", "latency_ms": 10, "model": "luna-exact"},
+            }
+        },
+        {"load_ratio": 0.1, "capacity_available": True, "executor_status": "healthy"},
+        NOW,
+    )
+    current = snapshot({"pursers": product.demands["pursers"]}, [
+        seat("luna-stopped", "worker", provider="luna", lifecycle="stopped"),
+        seat("deepseek-stopped", "worker", provider="deepseek", lifecycle="stopped"),
+    ])
+
+    plan = reconciler({"pursers": policy}).plan(current, {})
+
+    assert [(operation.action, operation.seat_id) for operation in plan.operations] == [
+        ("start", "deepseek-stopped")
+    ]
+    assert plan.provider_desired["pursers"]["deepseek"] == 1
+    assert plan.provider_desired["pursers"]["luna"] == 0
+
+
+@pytest.mark.parametrize('worker_state', ['stopped', 'ready'])
 def test_model_specific_providers_preserve_worker_and_reviewer_targets(worker_state):
     policy = board_policy(provider_maximums={'fast': 1, 'other': 1, 'review': 1})
     current = snapshot({'pursers': demand(work=1, review=1,

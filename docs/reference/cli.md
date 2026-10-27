@@ -823,8 +823,8 @@ usage: board_butler.py [-h] [--url URL] [--token-path TOKEN_PATH] [--home-board 
                        [--approval-scan-budget APPROVAL_SCAN_BUDGET] [--act-on-board BOARD_ID] [--act-on-registry]
                        [--no-live-candidates-cycles NO_LIVE_CANDIDATES_CYCLES]
                        [--active-action {park_no_live_candidates,refuse_incapable_target}]
-                       [--action-hold-seconds ACTION_HOLD_SECONDS] [--once] [--dry-run]
-                       [--kill-switch | --veto-question VETO_QUESTION] [--control-reason CONTROL_REASON]
+                       [--action-hold-seconds ACTION_HOLD_SECONDS] [--once] [--apply-intake-dispatch-policy-once]
+                       [--dry-run] [--kill-switch | --veto-question VETO_QUESTION] [--control-reason CONTROL_REASON]
 
 Registry-wide coordinator findings refresher and policy-gated question answerer. The butler runs the real coordinator
 derivation for every active registry board on a bounded cycle and listens for coordinator questions through the same
@@ -889,6 +889,8 @@ options:
   --action-hold-seconds ACTION_HOLD_SECONDS
                         veto window before an enabled mechanical action can execute
   --once
+  --apply-intake-dispatch-policy-once
+                        explicitly apply configured dispatch policies to already registered source boards, then exit
   --dry-run
   --kill-switch
   --veto-question VETO_QUESTION

@@ -137,6 +137,8 @@ MECHANICAL_ACTION_CLASSES = (
 MAX_FINDINGS = 50
 MAX_STATE_CHARS = 4_800
 MAX_PROJECT_ONBOARDING_AUDITS = 25
+MAX_EXISTING_POLICY_APPLY_BOARDS = 200
+MAX_EXISTING_POLICY_APPLY_REPORT_ROWS = 100
 MAX_PROVIDER_RESPONSE_BYTES = 1_000_000
 MAX_PROVIDER_DRAFT_CHARS = 2_000
 MAX_PROVIDER_PROMPT_CHARS = 12_000
@@ -738,6 +740,9 @@ class FleetDemand:
     provider_kinds: Mapping[str, str] = field(default_factory=dict)
     provider_local_readiness: Mapping[str, bool] = field(default_factory=dict)
     provider_quota_status: Mapping[str, str] = field(default_factory=dict)
+    provider_models: Mapping[str, str] = field(default_factory=dict)
+    worker_models_by_tier: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    unsupported_worker_model_tiers: tuple[str, ...] = ()
     source_board_ids: tuple[str, ...] = ()
     excluded_parked: int = 0
     excluded_blocked: int = 0
@@ -759,6 +764,16 @@ class FleetDemand:
             )
         ):
             raise ValueError("fleet demand counts are invalid")
+        if any(
+            tier not in {"1", "2", "3"}
+            or not isinstance(models, tuple)
+            or not models
+            or any(not isinstance(model, str) or not model for model in models)
+            for tier, models in self.worker_models_by_tier.items()
+        ) or any(tier not in {"1", "2", "3"} for tier in self.unsupported_worker_model_tiers):
+            raise ValueError("fleet worker model policy is invalid")
+        if any(not isinstance(provider, str) or not provider for provider in self.provider_models):
+            raise ValueError("fleet provider model observations are invalid")
         if any(tier not in {1, 2, 3} for tier in self.open_by_tier):
             raise ValueError("fleet demand tier is invalid")
         if any(
@@ -782,10 +797,33 @@ class FleetDemand:
         ):
             raise ValueError("fleet demand source boards are invalid")
 
+    def provider_supports_open_work(self, provider: str) -> bool:
+        """Whether a provider model exactly matches at least one queued worker tier."""
+        demanded_tiers = [tier for tier, count in self.open_by_tier.items() if count]
+        return not demanded_tiers or any(
+            str(tier) not in self.worker_models_by_tier
+            or self.provider_models.get(provider)
+            in self.worker_models_by_tier[str(tier)]
+            for tier in demanded_tiers
+        )
+
+    @property
+    def routable_open_by_tier(self) -> Mapping[int, int]:
+        """Exclude tiers for which configured policy exposes no provider model."""
+        return {
+            tier: count
+            for tier, count in self.open_by_tier.items()
+            if str(tier) not in self.worker_models_by_tier
+            or str(tier) not in self.unsupported_worker_model_tiers
+        }
+
     @property
     def work_pressure(self) -> int:
         weights = {1: 1, 2: 2, 3: 4}
-        pressure = sum(weights[tier] * count for tier, count in self.open_by_tier.items())
+        pressure = sum(
+            weights[tier] * self.routable_open_by_tier.get(tier, 0)
+            for tier in self.open_by_tier
+        )
         # An offer belongs to an already-counted open ticket. Keep expiring
         # offers as an observable starvation signal, but never count the same
         # runnable unit twice when deriving capacity.
@@ -2004,6 +2042,30 @@ def fleet_snapshot_from_products(
         kinds: dict[str, str] = {}
         local_readiness: dict[str, bool] = {}
         quota_status: dict[str, str] = {}
+        raw_dispatch_policy = board.get("dispatch_policy", {})
+        worker_models = (
+            raw_dispatch_policy.get("worker_models_by_tier", {})
+            if isinstance(raw_dispatch_policy, Mapping) else {}
+        )
+        if not isinstance(worker_models, Mapping) or len(worker_models) > 3:
+            raise ValueError(f"{board_id}: worker model policy is invalid")
+        worker_models_by_tier: dict[str, tuple[str, ...]] = {}
+        for tier_key, model_ids in worker_models.items():
+            if (
+                tier_key not in {"1", "2", "3"}
+                or not isinstance(model_ids, list)
+                or not model_ids
+                or any(
+                    not isinstance(item, str) or not item or item != item.strip()
+                    or len(item) > 200
+                    or any(ord(char) < 32 or ord(char) == 127 for char in item)
+                    for item in model_ids
+                )
+                or len(set(model_ids)) != len(model_ids)
+            ):
+                raise ValueError(f"{board_id}: worker model policy is invalid")
+            worker_models_by_tier[tier_key] = tuple(model_ids)
+        provider_models: dict[str, str] = {}
         for provider, observation in providers.items():
             if not isinstance(observation, Mapping):
                 raise ValueError(f"{board_id}: provider observation is invalid")
@@ -2032,6 +2094,37 @@ def fleet_snapshot_from_products(
             kinds[str(provider)] = str(kind)
             local_readiness[str(provider)] = ready
             quota_status[str(provider)] = str(quota)
+            model = observation.get("model")
+            if model is None:
+                model = observation.get("model_id")
+            if model is not None:
+                if (
+                    not isinstance(model, str)
+                    or not model
+                    or model != model.strip()
+                    or len(model) > 200
+                    or any(ord(char) < 32 or ord(char) == 127 for char in model)
+                ):
+                    raise ValueError(f"{board_id}: provider model observation is invalid")
+                provider_models[str(provider)] = model
+        provider_maximums = board.get("provider_maximums", {})
+        if not isinstance(provider_maximums, Mapping) or any(
+            not isinstance(provider, str) or not provider
+            or not isinstance(maximum, int) or isinstance(maximum, bool)
+            or maximum < 0
+            for provider, maximum in provider_maximums.items()
+        ):
+            raise ValueError(f"{board_id}: provider fleet maximums are invalid")
+        unsupported_worker_model_tiers = tuple(
+            str(tier) for tier, count in open_by_tier.items()
+            if count
+            and str(tier) in worker_models_by_tier
+            and not any(
+                provider_models.get(provider) in worker_models_by_tier[str(tier)]
+                and provider_maximums.get(provider, 0) > 0
+                for provider in providers
+            )
+        )
         demands[board_id] = FleetDemand(
             board_id=board_id,
             open_by_tier=open_by_tier,
@@ -2044,6 +2137,9 @@ def fleet_snapshot_from_products(
             provider_kinds=kinds,
             provider_local_readiness=local_readiness,
             provider_quota_status=quota_status,
+            provider_models=provider_models,
+            worker_models_by_tier=worker_models_by_tier,
+            unsupported_worker_model_tiers=unsupported_worker_model_tiers,
             source_board_ids=tuple(sorted(source_boards)),
             excluded_parked=excluded_parked,
             excluded_blocked=excluded_blocked,
@@ -2398,12 +2494,23 @@ class FleetReconciler:
                     and not seat.process_known_absent
                 )
                 pressure = _role_pressure(demand, role)
-                available = sum(
+                model_reserved_live = sum(
+                    1
+                    for seat in seats
+                    if role == "worker"
+                    and seat.managed
+                    and seat.role == role
+                    and seat.template_id in policy.approved_template_ids
+                    and seat.serving
+                    and not demand.provider_supports_open_work(seat.provider)
+                )
+                available = model_reserved_live + sum(
                     1
                     for seat in seats
                     if seat.managed
                     and seat.role == role
                     and seat.template_id in policy.approved_template_ids
+                    and demand.provider_supports_open_work(seat.provider)
                     and (seat.serving or (
                         seat.lifecycle in {"stopped", "draining"}
                         and _healthy_provider(demand, policy, seat.provider)))
@@ -2424,6 +2531,14 @@ class FleetReconciler:
                     }
                     for seat in seats
                 )
+                model_unavailable = (
+                    role == "worker"
+                    and demand.work_pressure == 0
+                    and any(
+                        count and str(tier) in demand.unsupported_worker_model_tiers
+                        for tier, count in demand.open_by_tier.items()
+                    )
+                )
                 if pressure:
                     requested = max(
                         role_policy.minimum,
@@ -2433,8 +2548,12 @@ class FleetReconciler:
                 else:
                     requested = role_policy.minimum
                 requested = max(requested, live)
+                if role == "worker":
+                    requested = max(requested, role_policy.minimum) + model_reserved_live
                 demand_requested = requested
                 limiting_reasons: list[str] = []
+                if model_unavailable:
+                    limiting_reasons.append("worker_model")
                 if demand_requested > role_policy.maximum:
                     limiting_reasons.append("role_cap")
                 if demand_requested > approved and not authorization_blocked:
@@ -2647,6 +2766,7 @@ class FleetReconciler:
             for role in FLEET_ROLES:
                 candidates = sorted(
                     (seat for seat in inventory if seat.role == role and seat.lifecycle == "stopped"
+                     and (role != "worker" or demand.provider_supports_open_work(seat.provider))
                      and _healthy_provider(demand, policy, seat.provider)
                      and self._failure_backoff_elapsed(
                          seat, policy, snapshot.observed_at
@@ -2747,6 +2867,7 @@ class FleetReconciler:
                         seat
                         for seat in role_seats
                         if seat.lifecycle == "stopped"
+                        and (role != "worker" or demand.provider_supports_open_work(seat.provider))
                         and _healthy_provider(demand, policy, seat.provider)
                         and self._failure_backoff_elapsed(seat, policy, now)
                     ),
@@ -3123,7 +3244,9 @@ class FleetReconciler:
                 return "headroom"
             if reasons & {"role_cap", "board_cap", "host_cap"}:
                 return "role_cap"
-            for reason in ("template_pool", "provider", "cooldown", "authorization"):
+            for reason in (
+                "worker_model", "template_pool", "provider", "cooldown", "authorization"
+            ):
                 if reason in reasons:
                     return reason
             return "none"
@@ -3214,6 +3337,9 @@ class FleetReconciler:
                 },
                 "role_limiting_reasons": role_limit_reasons,
                 "limiting_reason": limiting_reason,
+                "unsupported_worker_model_tiers": list(
+                    demand.unsupported_worker_model_tiers
+                ),
             },
             "kill_latched": False,
         }
@@ -13203,6 +13329,94 @@ def plan_mechanical_actions(
     return actions
 
 
+def plan_existing_dispatch_policy(
+    policies: Mapping[str, Any], registry: Mapping[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[dict[str, str]]]:
+    """Resolve only explicitly mapped, active registry projects without guessing."""
+    desired_by_project: dict[str, dict[str, Any]] = {}
+    repository_by_project: dict[str, Any] = {}
+    conflicts: set[str] = set()
+    failures: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
+    for _source_id, source in sorted(policies.items()):
+        for project_name in sorted(source.repositories):
+            desired: dict[str, Any] = {}
+            if source.default_ticket_tier is not None:
+                desired["default_ticket_tier"] = source.default_ticket_tier
+            if source.worker_models_by_tier is not None:
+                desired["worker_models_by_tier"] = {
+                    tier: list(models)
+                    for tier, models in sorted(source.worker_models_by_tier.items())
+                }
+            if not desired:
+                skipped.append(
+                    {"project": project_name, "reason": "no_explicit_dispatch_policy"}
+                )
+                continue
+            repository = source.repositories[project_name]
+            previous = desired_by_project.get(project_name)
+            if previous is not None and repository_by_project[project_name] != repository:
+                conflicts.add(project_name)
+                failures.append(
+                    {
+                        "project": project_name,
+                        "reason": "conflicting_source_policies",
+                    }
+                )
+                continue
+            if previous is not None and any(
+                key in previous and previous[key] != value
+                for key, value in desired.items()
+            ):
+                conflicts.add(project_name)
+                failures.append(
+                    {
+                        "project": project_name,
+                        "reason": "conflicting_source_policies",
+                    }
+                )
+                continue
+            desired_by_project[project_name] = {**(previous or {}), **desired}
+            repository_by_project[project_name] = repository
+
+    projects = registry.get("projects") if isinstance(registry, Mapping) else None
+    if not isinstance(projects, Mapping):
+        raise ValueError("validated project registry has no projects map")
+    by_board: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    for project_name, desired in sorted(desired_by_project.items()):
+        if project_name in conflicts:
+            continue
+        entry = projects.get(project_name)
+        if not isinstance(entry, Mapping):
+            skipped.append({"project": project_name, "reason": "not_registered"})
+            continue
+        if entry.get("status") != "active":
+            skipped.append({"project": project_name, "reason": "not_active"})
+            continue
+        board_id = entry.get("board_id")
+        if not isinstance(board_id, str) or not board_id:
+            failures.append({"project": project_name, "reason": "invalid_registry_board_id"})
+            continue
+        by_board.setdefault(board_id, []).append((project_name, desired))
+
+    registered_owners: dict[str, list[str]] = {}
+    for project_name, entry in projects.items():
+        if not isinstance(entry, Mapping) or entry.get("status") != "active":
+            continue
+        board_id = entry.get("board_id")
+        if isinstance(board_id, str) and board_id:
+            registered_owners.setdefault(board_id, []).append(str(project_name))
+
+    plans: list[dict[str, Any]] = []
+    for board_id, rows in sorted(by_board.items()):
+        if len(rows) != 1 or len(registered_owners.get(board_id, [])) != 1:
+            failures.append({"board_id": board_id, "reason": "ambiguous_registry_mapping"})
+            continue
+        project_name, desired = rows[0]
+        plans.append({"project": project_name, "board_id": board_id, "desired": desired})
+    return plans, skipped, failures
+
+
 class CentralProjectRegistry:
     """Central-backed registry/board adapter used only by the onboarding core."""
 
@@ -13223,21 +13437,71 @@ class CentralProjectRegistry:
         validated = _registry_admin_api()["validate_registry"](document)
         return validated, hashlib.sha256(value.encode("utf-8")).hexdigest()
 
+    async def apply_existing_dispatch_policy(
+        self,
+        board_id: str,
+        desired: Mapping[str, Any],
+        *,
+        dry_run: bool,
+    ) -> dict[str, str]:
+        """Apply only explicit dispatch fields through the resident identity."""
+        async with self.backend._client_for_board(board_id) as client:
+            status = await client._call("board_status", {})
+            current_policy = status.get("dispatch_policy") if isinstance(status, Mapping) else None
+            if not isinstance(current_policy, Mapping):
+                raise RuntimeError("board dispatch policy readback is malformed")
+            changed = {
+                key: copy.deepcopy(value)
+                for key, value in desired.items()
+                if current_policy.get(key, {} if key == "worker_models_by_tier" else None) != value
+            }
+            if not changed:
+                return {"status": "unchanged"}
+            if dry_run:
+                return {"status": "would_change"}
+            result = await client._call(
+                "board_dispatch_policy_set",
+                {
+                    "agent_name": client.agent_name,
+                    **changed,
+                },
+            )
+            readback = await client._call("board_status", {})
+            effective = readback.get("dispatch_policy") if isinstance(readback, Mapping) else None
+            if not isinstance(effective, Mapping) or any(
+                effective.get(key, {} if key == "worker_models_by_tier" else None) != value
+                for key, value in desired.items()
+            ):
+                raise RuntimeError("board dispatch policy readback mismatch")
+            if not isinstance(result, Mapping) or result.get("changed") is not True:
+                raise RuntimeError("dispatch policy setter did not confirm a change")
+            return {"status": "changed"}
+
     async def ensure_board(
-        self, board_id: str, _domain: str, default_ticket_tier: int | None = None
+        self,
+        board_id: str,
+        _domain: str,
+        default_ticket_tier: int | None = None,
+        worker_models_by_tier: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
         async with self.backend._client_for_board(board_id, onboarding=True) as client:
-            await client.board_onboard(
-                role="coordinator",
-                capabilities=dict(BOARD_BUTLER_CAPABILITIES),
-                allow_takeover=True,
-            )
-            if default_ticket_tier is None:
+            # _client_for_board has already joined an existing board or onboarded
+            # the explicit fresh-board creator in BoardClient.__aenter__.
+            if default_ticket_tier is None and worker_models_by_tier is None:
                 return
             status = await client._call("board_status", {})
             policy = status.get("dispatch_policy") if isinstance(status, Mapping) else None
             policy = dict(policy) if isinstance(policy, Mapping) else {}
-            if policy.get("default_ticket_tier") == default_ticket_tier:
+            requested_models = (
+                {tier: list(models) for tier, models in worker_models_by_tier.items()}
+                if worker_models_by_tier is not None
+                else policy.get("worker_models_by_tier", {})
+            )
+            if (
+                (default_ticket_tier is None
+                 or policy.get("default_ticket_tier") == default_ticket_tier)
+                and policy.get("worker_models_by_tier", {}) == requested_models
+            ):
                 return
             arguments = {
                 key: policy[key]
@@ -13246,15 +13510,21 @@ class CentralProjectRegistry:
                     "broadcast_reoffer_s",
                     "second_opinion",
                     "fallback_broadcast",
+                    "worker_models_by_tier",
                 )
                 if key in policy
             }
+            if worker_models_by_tier is not None:
+                arguments["worker_models_by_tier"] = requested_models
             await client._call(
                 "board_dispatch_policy_set",
                 {
                     "agent_name": client.agent_name,
                     **arguments,
-                    "default_ticket_tier": default_ticket_tier,
+                    **(
+                        {"default_ticket_tier": default_ticket_tier}
+                        if default_ticket_tier is not None else {}
+                    ),
                 },
             )
 
@@ -13751,8 +14021,10 @@ class CentralBackend:
             assert_independent_identity(self.identity, status.get("agents", []))
             self.latest_seq = max(0, int(status.get("latest_seq", 0) or 0))
             self.project_name = await self._project_name_from_registry()
-            if not self.args.dry_run and not (
-                self.args.kill_switch or self.args.veto_question
+            if (
+                not getattr(self.args, "apply_intake_dispatch_policy_once", False)
+                and not self.args.dry_run
+                and not (self.args.kill_switch or self.args.veto_question)
             ):
                 await backfill_retrospective_evaluations(
                     self, utc_now(), board_id=self.args.home_board
@@ -13761,7 +14033,10 @@ class CentralBackend:
             await self._context.__aexit__(*sys.exc_info())
             self.client = None
             raise
-        if self._technical_supervisor.enabled():
+        if (
+            not getattr(self.args, "apply_intake_dispatch_policy_once", False)
+            and self._technical_supervisor.enabled()
+        ):
             self._technical_supervision_task = asyncio.create_task(
                 self._technical_supervisor.run(), name="board-butler-technical-supervision"
             )
@@ -14269,6 +14544,56 @@ class CentralBackend:
             )
         self._source_intake_findings_pending = False
 
+    async def apply_existing_dispatch_policy(self, *, dry_run: bool) -> int:
+        """Apply one fully validated source-policy plan to existing boards only."""
+        registry, _registry_digest = await CentralProjectRegistry(self).snapshot()
+        plans, skipped, failures = plan_existing_dispatch_policy(
+            self._project_onboarding_policies, registry
+        )
+        if len(plans) > MAX_EXISTING_POLICY_APPLY_BOARDS:
+            failures.append({"reason": "board_plan_capacity_exceeded"})
+            plans = []
+        if len(skipped) > MAX_EXISTING_POLICY_APPLY_REPORT_ROWS:
+            skipped = skipped[:MAX_EXISTING_POLICY_APPLY_REPORT_ROWS]
+            skipped.append({"reason": "additional_skips_omitted"})
+        if len(failures) > MAX_EXISTING_POLICY_APPLY_REPORT_ROWS:
+            failures = failures[:MAX_EXISTING_POLICY_APPLY_REPORT_ROWS]
+            failures.append({"reason": "additional_failures_omitted"})
+
+        results: list[dict[str, str]] = []
+        # Ambiguous or conflicting routes invalidate the complete plan. Do not
+        # partially apply a source configuration that cannot be interpreted.
+        if not failures:
+            adapter = CentralProjectRegistry(self)
+            for plan in plans:
+                row = {"project": plan["project"], "board_id": plan["board_id"]}
+                try:
+                    result = await adapter.apply_existing_dispatch_policy(
+                        plan["board_id"], plan["desired"], dry_run=dry_run
+                    )
+                    row["status"] = result["status"]
+                except Exception as exc:
+                    row["status"] = "failed"
+                    row["reason"] = type(exc).__name__
+                    failures.append({
+                        "project": plan["project"],
+                        "board_id": plan["board_id"],
+                        "reason": type(exc).__name__,
+                    })
+                results.append(row)
+        if len(results) > MAX_EXISTING_POLICY_APPLY_REPORT_ROWS:
+            results = results[:MAX_EXISTING_POLICY_APPLY_REPORT_ROWS]
+            results.append({"status": "additional_results_omitted"})
+        report = {
+            "mode": "dry_run" if dry_run else "apply_once",
+            "results": results,
+            "skipped": skipped,
+            "failures": failures,
+            "ok": not failures,
+        }
+        print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+        return 1 if failures else 0
+
     @asynccontextmanager
     async def _client_for_board(self, board_id: str, *, onboarding: bool = False) -> AsyncIterator[Any]:
         """Yield a client whose immutable board context matches the operation."""
@@ -14277,18 +14602,39 @@ class CentralBackend:
             return
         from pursers_client import BoardClient
 
-        async with BoardClient(
-            self.args.url,
-            self.token,
-            board_id,
-            agent_name=self.args.agent_name,
-            # A fresh board requires creator admission before coordinator-only joins.
-            # Explicit false capabilities keep this provisioning identity out of work.
-            role="worker" if onboarding else "coordinator",
-            capabilities=dict(BOARD_BUTLER_CAPABILITIES),
-            allow_takeover=True,
-        ) as client:
+        from pursers_client import BoardClientError
+
+        def new_client(*, create_board: bool) -> Any:
+            return BoardClient(
+                self.args.url,
+                self.token,
+                board_id,
+                agent_name=self.args.agent_name,
+                # Explicit false capabilities keep this provisioning identity out of work.
+                role="coordinator",
+                capabilities=dict(BOARD_BUTLER_CAPABILITIES),
+                allow_takeover=True,
+                create_board=create_board,
+            )
+
+        client = new_client(create_board=onboarding)
+        try:
+            await client.__aenter__()
+        except BoardClientError as exc:
+            # Onboarding may target an already provisioned source board. The
+            # explicit creator admission must fail closed there, then normal
+            # board membership/admin authorization is used without elevation.
+            if not onboarding or "genuinely fresh board" not in str(exc):
+                raise
+            client = new_client(create_board=False)
+            await client.__aenter__()
+        try:
             yield client
+        except BaseException as exc:
+            await client.__aexit__(type(exc), exc, exc.__traceback__)
+            raise
+        else:
+            await client.__aexit__(None, None, None)
 
     def _record_registry_failure(
         self, board_id: str, operation: str, reason_code: str
@@ -17385,6 +17731,14 @@ async def run(
     *,
     backend_factory: Any = CentralBackend,
 ) -> int | None:
+    if getattr(args, "apply_intake_dispatch_policy_once", False):
+        with SingletonLock(args.pid_file):
+            token = _read_token(args.token_path)
+            async with backend_factory(args, token) as backend:
+                return await backend.apply_existing_dispatch_policy(
+                    dry_run=bool(args.dry_run)
+                )
+
     connector_runtimes: tuple[ConnectorRuntime, ...] = ()
     connector_sources: tuple[SourceDeclaration, ...] = ()
     connector_startup_findings: tuple[dict[str, Any], ...] = ()
@@ -17731,6 +18085,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="veto window before an enabled mechanical action can execute",
     )
     parser.add_argument("--once", action="store_true")
+    parser.add_argument(
+        "--apply-intake-dispatch-policy-once",
+        action="store_true",
+        help="explicitly apply configured dispatch policies to already registered source boards, then exit",
+    )
     parser.add_argument("--dry-run", action="store_true")
     controls = parser.add_mutually_exclusive_group()
     controls.add_argument("--kill-switch", action="store_true")
@@ -17739,6 +18098,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.connector_probe and args.connector_config is None:
         parser.error("--connector-probe requires --connector-config")
+    if args.apply_intake_dispatch_policy_once:
+        if args.intake_onboarding_config is None:
+            parser.error("--apply-intake-dispatch-policy-once requires --intake-onboarding-config")
+        if args.runtime_mode != "shadow" or args.active_authorization_file is not None:
+            parser.error("one-shot dispatch policy maintenance cannot use active runtime mode")
+        if args.connector_probe or args.once or args.kill_switch or args.veto_question:
+            parser.error("one-shot dispatch policy maintenance cannot be combined with other actions")
     if not args.connector_probe:
         missing = [
             name

@@ -57,6 +57,202 @@ def _accepted_ticket_fixture(ticket_id: str, project: str, sha: str,
     return submission, review
 
 
+def test_existing_dispatch_policy_mode_is_explicit_and_one_shot(tmp_path: Path) -> None:
+    config = tmp_path / "onboarding.json"
+    config.write_text(json.dumps({"sources": {"source": {
+        "domain": "work",
+        "projects_root": str(tmp_path / "projects"),
+        "auto_onboard": False,
+        "per_cycle_cap": 1,
+        "repositories": {},
+        "default_ticket_tier": 3,
+    }}}), encoding="utf-8")
+    token = tmp_path / "token.jwt"
+    token.write_text("fixture-token", encoding="utf-8")
+    token.chmod(0o600)
+    base = cli_args(tmp_path)
+
+    default = butler.parse_args(base)
+    assert default.apply_intake_dispatch_policy_once is False
+
+    maintenance = butler.parse_args([
+        *base,
+        "--intake-onboarding-config", str(config),
+        "--apply-intake-dispatch-policy-once",
+        "--dry-run",
+    ])
+    assert maintenance.apply_intake_dispatch_policy_once is True
+    assert maintenance.dry_run is True
+
+    class QuietBackend:
+        entered = False
+        calls = 0
+
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        async def __aenter__(self):
+            self.entered = True
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def apply_existing_dispatch_policy(self, *, dry_run: bool) -> int:
+            self.calls += 1
+            assert dry_run is True
+            return 0
+
+    backend = QuietBackend()
+    asyncio.run(butler.run(
+        maintenance,
+        backend_factory=lambda *_args: backend,
+    ))
+    assert backend.entered and backend.calls == 1
+
+    with pytest.raises(SystemExit):
+        butler.parse_args([*base, "--apply-intake-dispatch-policy-once"])
+
+    with pytest.raises(SystemExit):
+        butler.parse_args([
+            *base,
+            "--intake-onboarding-config", str(config),
+            "--runtime-mode", "active",
+            "--active-authorization-file", str(tmp_path / "authorization.json"),
+            "--apply-intake-dispatch-policy-once",
+        ])
+
+
+def test_existing_dispatch_policy_plan_is_explicit_and_fails_closed() -> None:
+    onboarding = butler._project_onboarding_api()
+    repository = onboarding["RepositoryResolution"]
+    source_type = onboarding["IntakeSourcePolicy"]
+
+    def source(source_id: str, *, tier: int | None, models: Mapping[str, tuple[str, ...]] | None,
+               project: str = "alpha"):
+        return source_type(
+            source_id=source_id,
+            domain="work",
+            projects_root=Path("/data/projects"),
+            auto_onboard=False,
+            per_cycle_cap=1,
+            retry_limit=1,
+            retry_backoff_s=1,
+            repositories={project: repository(f"https://example.test/{project}.git")},
+            default_ticket_tier=tier,
+            worker_models_by_tier=models,
+        )
+
+    registry = {"schema_version": 1, "projects": {
+        "alpha": {"board_id": "alpha-board", "status": "active"},
+        "beta": {"board_id": "beta-board", "status": "active"},
+        "paused": {"board_id": "paused-board", "status": "paused"},
+    }}
+    plan, skipped, failures = butler.plan_existing_dispatch_policy(
+        {"one": source("one", tier=3, models={"1": ("model-a",)}),
+         "two": source("two", tier=3, models={"1": ("model-a",)}, project="beta")}, registry
+    )
+    assert plan == [
+        {"project": "alpha", "board_id": "alpha-board", "desired": {
+            "default_ticket_tier": 3, "worker_models_by_tier": {"1": ["model-a"]}
+        }},
+        {"project": "beta", "board_id": "beta-board", "desired": {
+            "default_ticket_tier": 3, "worker_models_by_tier": {"1": ["model-a"]}
+        }},
+    ]
+    assert skipped == [] and failures == []
+
+    conflicting, _, conflicts = butler.plan_existing_dispatch_policy(
+        {"one": source("one", tier=2, models=None),
+         "two": source("two", tier=3, models=None)}, registry
+    )
+    assert conflicting == []
+    assert conflicts == [{"project": "alpha", "reason": "conflicting_source_policies"}]
+
+    inactive, skipped, failures = butler.plan_existing_dispatch_policy(
+        {"one": source("one", tier=2, models=None, project="paused")}, registry
+    )
+    assert inactive == [] and failures == []
+    assert skipped == [{"project": "paused", "reason": "not_active"}]
+
+    ambiguous_registry = {"schema_version": 1, "projects": {
+        "alpha": {"board_id": "same-board", "status": "active"},
+        "beta": {"board_id": "same-board", "status": "active"},
+    }}
+    ambiguous, _, failures = butler.plan_existing_dispatch_policy(
+        {"one": source("one", tier=2, models=None),
+         "two": source("two", tier=2, models=None, project="beta")},
+        ambiguous_registry,
+    )
+    assert ambiguous == []
+    assert failures == [{"board_id": "same-board", "reason": "ambiguous_registry_mapping"}]
+
+
+def test_existing_dispatch_policy_adapter_changes_only_explicit_fields_and_reads_back() -> None:
+    class Board:
+        def __init__(self) -> None:
+            self.agent_name = "board-butler-test"
+            self.policy = {
+                "offer_ttl_s": 300,
+                "broadcast_reoffer_s": 60,
+                "second_opinion": True,
+                "fallback_broadcast": True,
+                "default_ticket_tier": 2,
+                "worker_models_by_tier": {"1": ["old-model"]},
+            }
+            self.setter_arguments: list[dict[str, Any]] = []
+
+        async def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            if name == "board_status":
+                return {"dispatch_policy": copy.deepcopy(self.policy)}
+            if name == "board_dispatch_policy_set":
+                self.setter_arguments.append(copy.deepcopy(arguments))
+                self.policy.update({k: copy.deepcopy(v) for k, v in arguments.items()
+                                    if k != "agent_name"})
+                return {"changed": True}
+            raise AssertionError(f"unexpected board operation {name}")
+
+    board = Board()
+
+    class Backend:
+        @contextlib.asynccontextmanager
+        async def _client_for_board(self, _board_id: str):
+            yield board
+
+    adapter = butler.CentralProjectRegistry(Backend())
+
+    async def exercise() -> None:
+        assert await adapter.apply_existing_dispatch_policy(
+            "registered-board", {"default_ticket_tier": 3}, dry_run=True
+        ) == {"status": "would_change"}
+        assert board.setter_arguments == []
+        assert await adapter.apply_existing_dispatch_policy(
+            "registered-board", {"default_ticket_tier": 3}, dry_run=False
+        ) == {"status": "changed"}
+        assert await adapter.apply_existing_dispatch_policy(
+            "registered-board", {"default_ticket_tier": 3}, dry_run=False
+        ) == {"status": "unchanged"}
+        assert len(board.setter_arguments) == 1
+        assert board.setter_arguments[0] == {
+            "agent_name": "board-butler-test", "default_ticket_tier": 3
+        }
+        assert board.policy == {
+            "offer_ttl_s": 300,
+            "broadcast_reoffer_s": 60,
+            "second_opinion": True,
+            "fallback_broadcast": True,
+            "default_ticket_tier": 3,
+            "worker_models_by_tier": {"1": ["old-model"]},
+        }
+        assert await adapter.apply_existing_dispatch_policy(
+            "registered-board", {"worker_models_by_tier": {}}, dry_run=False
+        ) == {"status": "changed"}
+        assert board.policy["worker_models_by_tier"] == {}
+        assert board.policy["offer_ttl_s"] == 300
+
+    asyncio.run(exercise())
+
+
 def test_final_validation_rejects_reported_failure_even_with_pass_and_exact_head() -> None:
     head = "d" * 40
     assert butler._final_validation_evidence_passed(f"All checks PASS at {head}.", head)
@@ -967,7 +1163,8 @@ def test_central_project_registry_adds_board_registry_and_bounded_audit() -> Non
     restored = loaded_retry[("sonarqube", "private")]
     assert restored.attempts == 2
     assert restored.retry_at == NOW + butler.timedelta(seconds=60)
-    assert len(client.onboarded) == 1
+    # The existing-board policy-only call has no coordinator join side effect.
+    assert len(client.onboarded) == 0
 
 
 def test_project_onboarding_retry_state_survives_bounded_audit_and_restart() -> None:

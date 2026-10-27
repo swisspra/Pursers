@@ -108,7 +108,12 @@
           }
         },
         "role_limiting_reasons": {"$ref": "#/$defs/roleReasons"},
-        "limiting_reason": {"$ref": "#/$defs/limitReason"}
+        "limiting_reason": {"$ref": "#/$defs/limitReason"},
+        "unsupported_worker_model_tiers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["1", "2", "3"]}
+        }
       }
     },
     "roleState": {

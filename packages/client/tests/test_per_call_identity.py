@@ -124,11 +124,43 @@ async def test_ticket_tier_defaults_are_deferred_to_central(monkeypatch) -> None
     await board.ticket_create(None, "explicit tier", tier=1)
     await board.board_dispatch_policy_set()
     await board.board_dispatch_policy_set(default_ticket_tier=1)
+    await board.board_dispatch_policy_set(
+        worker_models_by_tier={"1": ["vendor/exact-model"]}
+    )
 
     assert "tier" not in calls[0][1]
     assert calls[1][1]["tier"] == 1
     assert "default_ticket_tier" not in calls[2][1]
     assert calls[3][1]["default_ticket_tier"] == 1
+    assert calls[4][0] == "board_dispatch_policy_set"
+    assert calls[4][1]["agent_name"] == board.agent_name
+    assert calls[4][1]["worker_models_by_tier"] == {
+        "1": ["vendor/exact-model"]
+    }
+
+
+@pytest.mark.anyio
+async def test_explicit_board_creation_intent_is_opt_in_and_forwarded(monkeypatch) -> None:
+    board = BoardClient(
+        "https://central.example/mcp",
+        "TOKEN_PLACEHOLDER",
+        "fresh-board",
+        agent_name="butler",
+        role="coordinator",
+        capabilities={"can_work": False, "can_review": False},
+        create_board=True,
+    )
+    captured: dict[str, Any] = {}
+
+    async def call_refresh(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        captured.update(tool=name, arguments=arguments)
+        return joined(arguments["agent_name"])
+
+    monkeypatch.setattr(board, "_call_refresh", call_refresh)
+    await board.board_onboard(role="coordinator", create_board=True)
+    assert captured["tool"] == "board_onboard"
+    assert captured["arguments"]["create_board"] is True
+    assert captured["arguments"]["role"] == "coordinator"
 
 
 @pytest.mark.anyio

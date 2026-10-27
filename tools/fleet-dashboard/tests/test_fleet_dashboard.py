@@ -9830,7 +9830,14 @@ def test_dispatch_policy_save_validates_and_forwards_exact_contract() -> None:
 
         async def board_dispatch_policy_set(self, **kwargs: object) -> dict:
             calls.append(("dispatch", dict(kwargs)))
+            self.dispatch_policy = dict(kwargs)
             return {"dispatch_policy": dict(kwargs)}
+
+        async def board_status(self) -> dict:
+            return {
+                "claim_ttl_s": 300,
+                "dispatch_policy": getattr(self, "dispatch_policy", {}),
+            }
 
         async def board_claim_ttl_set(self, claim_ttl_s: int) -> dict:
             calls.append(("claim_ttl", claim_ttl_s))
@@ -9874,8 +9881,43 @@ def test_dispatch_policy_save_validates_and_forwards_exact_contract() -> None:
         ),
         ("claim_ttl", 300),
     ]
+    # Omitted model policy preserves compatibility with older client setters.
+    assert "worker_models_by_tier" not in calls[0][1]
     with pytest.raises(ValueError, match="dispatch policy fields"):
         asyncio.run(fetcher.save_dispatch("pursers", {**policy, "extra": True}))
+
+    exact_models = {"1": ["azure_ai/deepseek-v4.1-flash"], "3": ["provider/model-v2"]}
+    result = asyncio.run(fetcher.save_dispatch(
+        "pursers", {**policy, "worker_models_by_tier": json.dumps(exact_models)}
+    ))
+    assert result["dispatch_policy"]["worker_models_by_tier"] == exact_models
+    assert calls[-2][1] == {
+        "offer_ttl_s": 60,
+        "broadcast_reoffer_s": 600,
+        "second_opinion": False,
+        "fallback_broadcast": True,
+        "worker_models_by_tier": exact_models,
+    }
+    # An explicit empty mapping clears the policy; omission above retained it.
+    asyncio.run(fetcher.save_dispatch(
+        "pursers", {**policy, "worker_models_by_tier": json.dumps({})}
+    ))
+    assert calls[-2][1]["worker_models_by_tier"] == {}
+    for invalid in (
+        "not-json",
+        json.dumps({"4": ["model"]}),
+        json.dumps({"1": []}),
+        json.dumps({"1": ["  "]}),
+        json.dumps({"1": ["x" * 201]}),
+        json.dumps({"1": [f"model-{index}" for index in range(17)]}),
+        " " * 8193,
+    ):
+        with pytest.raises(ValueError, match="worker_models_by_tier"):
+            asyncio.run(fetcher.save_dispatch(
+                "pursers", {**policy, "worker_models_by_tier": invalid}
+            ))
+    # Validation happens before any Central policy or TTL mutation.
+    assert len(calls) == 6
 
 
 def test_capability_and_dispatch_ui_contract_is_present() -> None:
@@ -9885,6 +9927,12 @@ def test_capability_and_dispatch_ui_contract_is_present() -> None:
     assert "Dispatch by board" in dashboard.HTML
     assert "/api/config/suggestions" in dashboard.HTML
     assert "/api/dispatch" in dashboard.HTML
+    settings_view = dashboard.UI_ASSETS["/ui/views/settings.js"][1].decode("utf-8")
+    assert 'data-settings-family="worker_models_by_tier"' in settings_view
+    assert "Preview worker model changes" in settings_view
+    assert "worker_models_by_tier" in settings_view
+    assert "dispatch-model-form" in dashboard.UI_ASSETS["/ui/assets/app.js"][1].decode("utf-8")
+    assert "Save timing policy" in dashboard.UI_ASSETS["/ui/assets/app.js"][1].decode("utf-8")
     assert "Dispatch unavailable:" in dashboard.HTML
     assert "Current offer" in dashboard.HTML
     assert 'name="claim_ttl_s"' in dashboard.HTML

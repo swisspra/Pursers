@@ -321,6 +321,88 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(updated_legacy.structured_content["ticket"]["tier"], 1)
 
+    async def test_explicit_coordinator_board_creation_requires_unbound_writer_and_fresh_board(self) -> None:
+        # This unbound writer has coordinator scope but no board membership;
+        # without explicit intent it cannot implicitly become the first member.
+        coordinator_writer = central.Principal(
+            "PR-create-coordinate-writer", "create-coordinate-writer",
+            frozenset({"board:read", "board:write", "board:coordinate"}),
+        )
+        self.principal = coordinator_writer
+        with self.assertRaisesRegex(ToolError, "board access denied"):
+            await self.mcp.call_tool(
+                "board_onboard",
+                {
+                    "board_id": "fresh-without-intent",
+                    "agent_name": "butler-coordinator",
+                    "role": "coordinator",
+                    "capabilities": {"can_work": False, "can_review": False},
+                },
+            )
+
+        created = await self.mcp.call_tool(
+            "board_onboard",
+            {
+                "board_id": "fresh-created-explicitly",
+                "agent_name": "butler-coordinator",
+                "role": "coordinator",
+                "capabilities": {"can_work": False, "can_review": False},
+                "create_board": True,
+            },
+        )
+        self.assertFalse(created.is_error)
+        self.assertEqual(created.structured_content["role"], "coordinator")
+        self.assertFalse(created.structured_content["capabilities"]["can_work"])
+        self.assertFalse(created.structured_content["capabilities"]["can_review"])
+        membership = self.service.load("fresh-created-explicitly")[
+            "principal_memberships"][coordinator_writer.principal_id]
+        self.assertEqual(membership["role"], "admin")
+
+        # Repeating creation intent against the now-existing board is denied.
+        with self.assertRaisesRegex(ToolError, "genuinely fresh board"):
+            await self.mcp.call_tool(
+                "board_onboard",
+                {
+                    "board_id": "fresh-created-explicitly",
+                    "agent_name": "butler-coordinator",
+                    "role": "coordinator",
+                    "capabilities": {"can_work": False, "can_review": False},
+                    "create_board": True,
+                },
+            )
+
+    async def test_create_board_flag_rejects_wrong_authority_and_existing_board(self) -> None:
+        coordinator = central.Principal(
+            "PR-create-coordinate", "create-coordinate",
+            frozenset({"board:read", "board:coordinate"}),
+        )
+        self.principal = coordinator
+        with self.assertRaisesRegex(ToolError, "unbound writer"):
+            await self.mcp.call_tool(
+                "board_onboard",
+                {
+                    "board_id": "fresh-coordinate-only",
+                    "agent_name": "coordinator",
+                    "role": "coordinator",
+                    "create_board": True,
+                },
+            )
+
+        self.principal = central.Principal(
+            "PR-existing-create", "existing-create",
+            frozenset({"board:read", "board:write", "board:coordinate"}),
+        )
+        with self.assertRaisesRegex(ToolError, "genuinely fresh board"):
+            await self.mcp.call_tool(
+                "board_onboard",
+                {
+                    "board_id": "pursers",
+                    "agent_name": "admin-agent",
+                    "role": "coordinator",
+                    "create_board": True,
+                },
+            )
+
     async def test_board_default_ticket_tier_rejects_invalid_values(self) -> None:
         for invalid in (0, 4):
             with self.subTest(invalid=invalid):
@@ -331,6 +413,171 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
                         "board_dispatch_policy_set",
                         agent_name="admin-agent",
                         default_ticket_tier=invalid,
+                    )
+
+    async def test_exact_worker_model_routing_is_tier_specific_and_review_independent(self) -> None:
+        luna = await self.add_seat(
+            self.worker_a, "luna-worker", {"tier_max": 2, "model": "luna-exact"}
+        )
+        deepseek = await self.add_seat(
+            self.worker_b, "deepseek-worker", {"tier_max": 2, "model": "deepseek-exact"}
+        )
+        reviewer = await self.add_seat(
+            self.reviewer_a, "luna-reviewer", {
+                "tier_max": 2, "can_work": False, "can_review": True,
+                "model": "luna-exact",
+            }, role="reviewer",
+        )
+        self.principal = self.admin
+
+        # A policy update re-evaluates persisted offers, rather than leaving a
+        # previously eligible Luna offer live under the newly restrictive rule.
+        self.principal = self.admin
+        extra_worker = central.Principal(
+            "PR-worker-c", "worker-c", frozenset({"board:read", "board:write"})
+        )
+        await self.call(
+            "board_member_add", agent_name="admin-agent",
+            principal_id=extra_worker.principal_id, role="member",
+        )
+        self.principal = extra_worker
+        policy_luna = (
+            await self.call(
+                "board_join", agent_name="policy-luna",
+                capabilities={"tier_max": 2, "model": "luna-exact"},
+            )
+        ).structured_content["agent_id"]
+        unrestricted = (await self.create(tier=1, prefer_agents=[policy_luna])).structured_content["ticket"]
+        self.assertEqual(unrestricted["work_offer"]["agent_id"], policy_luna)
+        updated = await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent",
+            worker_models_by_tier={"1": ["deepseek-exact"]},
+        )
+        restricted = (await self.call("ticket_get", ticket_id=unrestricted["ticket_id"])).structured_content["ticket"]
+        self.assertEqual(restricted["work_offer"]["agent_id"], deepseek)
+        self.assertNotEqual(restricted["work_offer"]["agent_id"], policy_luna)
+        tier_one = restricted
+
+        self.principal = self.admin
+        tier_two = await self.create(tier=2, prefer_agents=[luna, deepseek])
+        self.assertEqual(tier_two.structured_content["ticket"]["work_offer"]["agent_id"], luna)
+
+        self.principal = self.worker_b
+        await self.call("ticket_claim", agent_name="deepseek-worker", ticket_id=tier_one["ticket_id"])
+        await self.call(
+            "ticket_submit", agent_name="deepseek-worker", ticket_id=tier_one["ticket_id"],
+            summary="focused change", test_output="synthetic test passed",
+        )
+        submitted = (await self.call("ticket_get", ticket_id=tier_one["ticket_id"])).structured_content["ticket"]
+        self.assertEqual(submitted["review_offer"]["agent_id"], reviewer)
+
+    async def test_exact_worker_model_routing_fails_closed_for_missing_or_mismatching_models(self) -> None:
+        missing = await self.add_seat(self.worker_a, "missing-model", {"tier_max": 2})
+        luna = await self.add_seat(
+            self.worker_b, "luna-only", {"tier_max": 2, "model": "luna-exact"}
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent",
+            worker_models_by_tier={"1": ["deepseek-exact"]},
+        )
+        created = (await self.create(tier=1, prefer_agents=[missing, luna])).structured_content["ticket"]
+        self.assertNotIn("work_offer", created)
+        self.assertEqual(created["dispatch_state"]["reason"], "no_eligible_worker")
+
+    async def test_exact_worker_model_policy_cannot_be_bypassed_by_direct_claim(self) -> None:
+        luna = await self.add_seat(
+            self.worker_a, "luna-only", {"tier_max": 2, "model": "luna-exact"}
+        )
+        self.principal = self.admin
+        created = (await self.create(tier=1, prefer_agents=[luna])).structured_content["ticket"]
+        ticket_id = created["ticket_id"]
+        await self.call(
+            "board_dispatch_policy_set",
+            agent_name="admin-agent",
+            worker_models_by_tier={"1": ["deepseek-exact"]},
+        )
+
+        def install_broadcast(document: dict[str, Any]) -> None:
+            document["tickets"][ticket_id]["dispatch_state"] = {
+                "state": "broadcast",
+                "kind": "work",
+                "reason": "test-broadcast",
+                "at": central.iso_at(central.time.time()),
+                "cycle": 0,
+            }
+
+        self.service.mutate("pursers", install_broadcast, require_generation=False)
+        self.principal = self.worker_a
+        with self.assertRaisesRegex(ToolError, "not offered to this seat"):
+            await self.call("ticket_claim", agent_name="luna-only", ticket_id=ticket_id)
+        refusal = self.service.journal.read_after("pursers", 0, 1000)["events"][-1]
+        self.assertIn("worker_model_mismatch", refusal["claim_diagnostics"]["failures"])
+
+        # Admin capability may bypass ordinary offer mechanics, but never this
+        # configured worker-model constraint.
+        self.principal = self.admin
+        with self.assertRaisesRegex(ToolError, "not offered to this seat"):
+            await self.call(
+                "ticket_claim", agent_name="admin-agent", ticket_id=ticket_id
+            )
+
+    async def test_existing_admin_boundary_remains_required_for_model_policy(self) -> None:
+        self.principal = self.worker_a
+        with self.assertRaises(ToolError):
+            await self.call(
+                "board_dispatch_policy_set",
+                agent_name="luna-only",
+                worker_models_by_tier={"1": ["deepseek-exact"]},
+            )
+
+    async def test_exact_worker_model_policy_cannot_be_bypassed_by_legacy_claim(self) -> None:
+        worker_id = await self.add_seat(
+            self.worker_a, "legacy-luna", {"tier_max": 2, "model": "luna-exact"}
+        )
+        self.principal = self.admin
+        created = (await self.create(tier=1)).structured_content["ticket"]
+        await self.call(
+            "board_dispatch_policy_set",
+            agent_name="admin-agent",
+            worker_models_by_tier={"1": ["deepseek-exact"]},
+        )
+
+        def disable_dispatch(document: dict[str, Any]) -> None:
+            for member in document["members"].values():
+                member["capabilities_explicit"] = False
+            document["tickets"][created["ticket_id"]].pop("work_offer", None)
+            document["tickets"][created["ticket_id"]].pop("dispatch_state", None)
+
+        self.service.mutate("pursers", disable_dispatch, require_generation=False)
+        self.principal = self.worker_a
+        with self.assertRaisesRegex(ToolError, "not eligible for this worker model"):
+            await self.call(
+                "ticket_claim", agent_name="legacy-luna", ticket_id=created["ticket_id"]
+            )
+        self.assertEqual(worker_id, central.agent_id("pursers", self.worker_a.principal_id, "legacy-luna"))
+
+    async def test_exact_worker_model_policy_validation_and_update_preservation(self) -> None:
+        valid = {"1": ["deepseek-exact"], "3": ["model/with:punctuation-v1"]}
+        configured = await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent",
+            worker_models_by_tier=valid,
+        )
+        self.assertEqual(configured.structured_content["dispatch_policy"]["worker_models_by_tier"], valid)
+        changed = await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=120,
+        )
+        self.assertEqual(changed.structured_content["dispatch_policy"]["worker_models_by_tier"], valid)
+        for invalid in (
+            {"0": ["model"]}, {"4": ["model"]}, {"01": ["model"]},
+            {"1": []}, {"1": ["model", "model"]}, {"1": [" model"]},
+            {"1": ["m" * 201]}, {"1": [1]}, ["model"], {"1": ["a" * 9_000]},
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ToolError):
+                    await self.call(
+                        "board_dispatch_policy_set", agent_name="admin-agent",
+                        worker_models_by_tier=invalid,
                     )
 
     @staticmethod

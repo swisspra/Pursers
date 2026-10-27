@@ -68,6 +68,7 @@ class IntakeSourcePolicy:
     retry_backoff_s: int
     repositories: Mapping[str, RepositoryResolution]
     default_ticket_tier: int | None = None
+    worker_models_by_tier: Mapping[str, tuple[str, ...]] | None = None
     member_roles: Mapping[str, str] = field(default_factory=dict)
     discovery: Mapping[str, Any] | None = None
     delivery_workflow: Mapping[str, Any] | None = None
@@ -103,7 +104,11 @@ class ProjectRegistry(Protocol):
     async def snapshot(self) -> tuple[Mapping[str, Any], str]: ...
 
     async def ensure_board(
-        self, board_id: str, domain: str, default_ticket_tier: int | None = None
+        self,
+        board_id: str,
+        domain: str,
+        default_ticket_tier: int | None = None,
+        worker_models_by_tier: Mapping[str, Sequence[str]] | None = None,
     ) -> None: ...
 
     async def ensure_members(self, board_id: str, roles: Mapping[str, str]) -> None: ...
@@ -167,6 +172,7 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
             "repositories",
             "repository_map",
             "default_ticket_tier",
+            "worker_models_by_tier",
             "member_roles",
             "discovery",
             "delivery_workflow",
@@ -246,6 +252,38 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
             if not isinstance(discovery, Mapping) or set(discovery) - {"kind", "refresh_seconds"} or discovery.get("kind") != "sonar_ado":
                 raise ValueError(f"{path}.discovery is invalid")
             discovery = {"kind": "sonar_ado", "refresh_seconds": _bounded_int(discovery.get("refresh_seconds", 900), path, 300, 86400)}
+        worker_models_raw = raw.get("worker_models_by_tier")
+        worker_models: dict[str, tuple[str, ...]] | None = None
+        if worker_models_raw is not None:
+            if not isinstance(worker_models_raw, Mapping) or len(worker_models_raw) > 3:
+                raise ValueError(
+                    f"{path}.worker_models_by_tier must be an object with at most three tiers"
+                )
+            worker_models = {}
+            for tier, models in worker_models_raw.items():
+                if tier not in {"1", "2", "3"}:
+                    raise ValueError(
+                        f"{path}.worker_models_by_tier keys must be tier strings 1, 2, or 3"
+                    )
+                if (
+                    not isinstance(models, list)
+                    or not models
+                    or len(models) > 16
+                    or any(
+                        not isinstance(model, str)
+                        or not model
+                        or model != model.strip()
+                        or len(model) > 200
+                        or any(ord(char) < 32 or ord(char) == 127 for char in model)
+                        for model in models
+                    )
+                    or len(set(models)) != len(models)
+                ):
+                    raise ValueError(
+                        f"{path}.worker_models_by_tier values must be unique, exact, "
+                        "non-empty model lists of at most 16 bounded IDs"
+                    )
+                worker_models[tier] = tuple(models)
         result[source] = IntakeSourcePolicy(
             source_id=source,
             domain=domain,
@@ -265,6 +303,7 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
                 86_400,
             ),
             repositories=repositories,
+            worker_models_by_tier=worker_models,
             member_roles=dict(member_roles),
             discovery=discovery,
             delivery_workflow=parse_delivery_workflow(raw.get("delivery_workflow")),
@@ -315,6 +354,11 @@ def inspect_source_onboarding_configuration(
         }
         if policy.default_ticket_tier is not None:
             source["default_ticket_tier"] = policy.default_ticket_tier
+        if policy.worker_models_by_tier is not None:
+            source["worker_models_by_tier"] = {
+                tier: list(models)
+                for tier, models in sorted(policy.worker_models_by_tier.items())
+            }
         if policy.discovery is not None:
             source["discovery"] = copy.deepcopy(dict(policy.discovery))
         if policy.delivery_workflow is not None:
@@ -644,7 +688,10 @@ class ProjectOnboarder:
                 if git_mode == "clone":
                     await asyncio.to_thread(lifecycle.clone_project_source, plan)
                 await self.registry.ensure_board(
-                    board_id, policy.domain, policy.default_ticket_tier
+                    board_id,
+                    policy.domain,
+                    policy.default_ticket_tier,
+                    policy.worker_models_by_tier,
                 )
                 if policy.member_roles:
                     await self.registry.ensure_members(board_id, policy.member_roles)

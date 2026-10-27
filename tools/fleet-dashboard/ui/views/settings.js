@@ -134,10 +134,12 @@
     return `<form class="settings-editor" data-settings-family="source_onboarding" data-expected="${esc(family.expected_sha256)}"><input type="hidden" name="source_document" value="${esc(JSON.stringify(stored))}"><div class="settings-editor-head"><div><h3>Source onboarding</h3><p>Explicit repository mapping, bounded retries and project lifecycle intent.</p></div>${familyStatus(family)}</div><div class="settings-source-grid">${Object.entries(doc.sources || {}).map(([id, source], index) => `<fieldset data-onboarding-index="${index}" data-source-id="${esc(id)}"><legend>${esc(id)}</legend><label>Domain<select name="onboarding_${index}_domain"><option value="work" ${source.domain === 'work' ? 'selected' : ''}>Work</option><option value="personal" ${source.domain === 'personal' ? 'selected' : ''}>Personal</option></select></label><label><input type="checkbox" name="onboarding_${index}_auto" ${source.auto_onboard ? 'checked' : ''}> Auto-onboard mapped repositories</label>${settingField('Projects root', `onboarding_${index}_root`, source.projects_root, 'required')}${settingField('Per-cycle cap', `onboarding_${index}_cap`, source.per_cycle_cap, 'type="number" min="1" max="100" required')}${settingField('Retry limit', `onboarding_${index}_retry`, source.retry_limit, 'type="number" min="1" max="20" required')}${settingField('Retry backoff seconds', `onboarding_${index}_backoff`, source.retry_backoff_s, 'type="number" min="1" max="86400" required')}<label>Repository mappings · hint | HTTPS URL | integration branch<textarea name="onboarding_${index}_repositories">${esc(Object.entries(source.repositories || {}).map(([hint, repo]) => `${hint} | ${repo.repository_url} | ${repo.integration_ref}`).join('\n'))}</textarea></label><label>Member roles · identity=role<textarea name="onboarding_${index}_roles">${esc(Object.entries(source.member_roles || {}).map(([name, role]) => `${name}=${role}`).join('\n'))}</textarea></label><label><input type="checkbox" name="onboarding_${index}_activate" ${source.activate_delivery_policy ? 'checked' : ''}> Request explicit delivery activation</label></fieldset>`).join('')}</div><div class="settings-safety-note"><b>Partial failure recovery</b><p>Applying this file does not clone, create a board, issue credentials, or activate delivery. Guided lifecycle operations remain idempotent and separately confirmed.</p></div><div class="card-actions"><button class="primary-action" type="submit">Preview onboarding changes</button><button class="button" type="reset">Reset to effective</button></div></form>`;
   }
 
-  function renderDispatchPolicy() {
-    const data = dispatch.get(keyFor(selectedCentral, selectedBoard));
-    if (!data) return '<p class="empty">Dispatch policy is loading.</p>';
-    return `<form class="settings-editor" data-settings-family="dispatch"><div class="settings-editor-head"><div><h3>Dispatch timing</h3><p>Concurrent seat capacity is configured separately from offer rates and token budgets.</p></div><span class="status" data-tone="ready">hot apply</span></div><div class="settings-fields">${settingField('Claim lease seconds', 'claim_ttl_s', data.claim_ttl_s, 'type="number" min="1" max="86400" required')}${settingField('Offer seconds', 'offer_ttl_s', data.offer_ttl_s, 'type="number" min="1" max="86400" required')}${settingField('Broadcast re-offer seconds', 'broadcast_reoffer_s', data.broadcast_reoffer_s, 'type="number" min="60" max="86400" required')}<label><input name="second_opinion" type="checkbox" ${data.second_opinion ? 'checked' : ''}> Request second opinion</label><label><input name="fallback_broadcast" type="checkbox" ${data.fallback_broadcast ? 'checked' : ''}> Allow fallback broadcast</label></div><div class="card-actions"><button class="primary-action" type="submit">Save dispatch policy</button></div></form>`;
+  function renderDispatchPolicy(data) {
+    const dispatchData = dispatch.get(keyFor(selectedCentral, selectedBoard));
+    if (!dispatchData) return '<p class="empty">Dispatch policy is loading.</p>';
+    const policy = dispatchData.dispatch_policy || {};
+    const models = data?.families?.dispatch;
+    return `<form class="settings-editor" data-settings-family="dispatch"><div class="settings-editor-head"><div><h3>Dispatch timing</h3><p>Concurrent seat capacity is configured separately from offer rates and token budgets.</p></div><span class="status" data-tone="ready">hot apply</span></div><div class="settings-fields">${settingField('Claim lease seconds', 'claim_ttl_s', dispatchData.claim_ttl_s, 'type="number" min="1" max="86400" required')}${settingField('Offer seconds', 'offer_ttl_s', policy.offer_ttl_s, 'type="number" min="1" max="86400" required')}${settingField('Broadcast re-offer seconds', 'broadcast_reoffer_s', policy.broadcast_reoffer_s, 'type="number" min="60" max="86400" required')}<label><input name="second_opinion" type="checkbox" ${policy.second_opinion ? 'checked' : ''}> Request second opinion</label><label><input name="fallback_broadcast" type="checkbox" ${policy.fallback_broadcast ? 'checked' : ''}> Allow fallback broadcast</label></div><div class="card-actions"><button class="primary-action" type="submit">Save dispatch timing policy</button></div></form>${!models || models.status !== 'configurable' ? `<article class="settings-unavailable">${familyStatus(models)}<p>${esc(models?.reason || 'Worker model routing is unavailable.')}</p></article>` : `<form class="settings-editor" data-settings-family="worker_models_by_tier" data-expected="${esc(models.expected_sha256)}"><div class="settings-editor-head"><div><h3>Exact worker model routing by tier</h3><p>Only exact worker model IDs are matched. Reviewers and Butler are unaffected. An empty object clears overrides.</p></div>${familyStatus(models)}</div><div class="settings-fields"><label class="settings-wide">Worker model IDs by tier · JSON object, e.g. {"1":["azure_ai/deepseek-v4.1-flash"]}<textarea name="worker_models_by_tier" maxlength="8192" required>${esc(JSON.stringify(models.values || {}, null, 2))}</textarea><small>Keys are tier strings 1–3; each exact model ID list contains 1–16 entries. Empty object clears the policy; legacy matching applies when no overrides are configured.</small></label></div><div class="settings-effective"><b>Effective worker model routing</b><span>${Object.keys(models.values || {}).length ? esc(JSON.stringify(models.values)) : 'No worker model overrides; legacy matching applies.'}</span></div><div class="card-actions"><button class="primary-action" type="submit">Preview worker model changes</button></div></form>`}`;
   }
 
   function renderDeliverySettings() {
@@ -171,7 +173,7 @@
     const sections = [
       ['Projects & sources', 'connector source grouping observation writeback onboarding repository mapping', `<div class="settings-stack">${sourceConnectorEditor(data?.families?.source_connectors)}${sourceOnboardingEditor(data?.families?.source_onboarding)}</div>`],
       ['Delivery', 'branches aggregate per-ticket gates reviewers conflicts schedule handoff', renderDeliverySettings()],
-      ['Seats & dispatch', 'capacity concurrent seats rates token budget role host runner profiles IDE', `<div class="settings-stack">${renderSeatSetup()}${renderDispatchPolicy()}${renderMemberships(data)}</div>`],
+      ['Seats & dispatch', 'capacity concurrent seats rates token budget role host runner profiles IDE', `<div class="settings-stack">${renderSeatSetup()}${renderDispatchPolicy(data)}${renderMemberships(data)}</div>`],
       ['Board policy & retention', 'review stale archive history journal maintenance release rollback', `<div class="settings-stack">${renderBoardPolicy(data)}${renderRetention(data)}</div>`],
     ];
     const scopeOptions = boardScopes().map(({central, board}, index) => `<option value="scope-${index}" data-central="${esc(central)}" data-board="${esc(board.board_id)}" ${central === selectedCentral && board.board_id === selectedBoard ? 'selected' : ''}>${esc(board.label)} · ${esc(central)} · ${esc(board.board_id)}</option>`).join('');
@@ -434,11 +436,30 @@
   }
 
   async function saveDispatch(form) {
+    if (form.dataset.settingsFamily === 'worker_models_by_tier') {
+      let workerModels;
+      try {
+        workerModels = JSON.parse(form.elements.worker_models_by_tier.value);
+        if (!workerModels || Array.isArray(workerModels) || typeof workerModels !== 'object') throw new Error('must be a JSON object');
+      } catch (_error) {
+        throw new Error('Worker model routing must be a valid JSON object.');
+      }
+      const scopeKey = keyFor(selectedCentral, selectedBoard);
+      const plan = await api(`/api/config/managed/plan?central=${encodeURIComponent(selectedCentral)}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({board_id: selectedBoard, family: 'worker_models_by_tier', expected_sha256: form.dataset.expected, changes: workerModels})});
+      if (scopeKey !== keyFor(selectedCentral, selectedBoard)) return;
+      pendingPlan = plan;
+      pendingPlanScopeKey = scopeKey;
+      settingsNotice = 'Worker model preview ready. Review the exact changes before apply.';
+      settingsError = '';
+      renderHub?.();
+      return;
+    }
     const payload = {board_id: selectedBoard, claim_ttl_s: Number(form.elements.claim_ttl_s.value), offer_ttl_s: Number(form.elements.offer_ttl_s.value), broadcast_reoffer_s: Number(form.elements.broadcast_reoffer_s.value), second_opinion: form.elements.second_opinion.checked, fallback_broadcast: form.elements.fallback_broadcast.checked};
+    if (!window.confirm(`Preview dispatch timing changes for ${selectedBoard}. This policy will be sent to Central:\n\n${JSON.stringify(payload, null, 2)}\n\nApply these changes?`)) return;
     const body = await api(`/api/dispatch?central=${encodeURIComponent(selectedCentral)}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
     dispatch.set(keyFor(selectedCentral, selectedBoard), body);
-    settingsNotice = 'Dispatch policy saved and read back from Central.';
-    renderHub?.();
+    settingsNotice = 'Dispatch timing saved and read back from Central.';
+    await loadSettings(true);
   }
 
   function deliveryPolicy(form) {

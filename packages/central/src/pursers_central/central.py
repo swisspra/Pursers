@@ -174,6 +174,42 @@ SEAT_IDENTITY_EVENT_FIELDS = frozenset(
 )
 DEFAULT_CLAIM_TTL_S = 900
 DEFAULT_BROADCAST_REOFFER_S = 600
+MAX_WORKER_MODEL_RULES = 3
+MAX_WORKER_MODELS_PER_TIER = 16
+MAX_WORKER_MODEL_ID_LENGTH = 200
+
+
+def validate_worker_models_by_tier(value: Any) -> dict[str, list[str]]:
+    """Validate exact advertised model IDs allowed to work each ticket tier."""
+    if not isinstance(value, Mapping) or len(value) > MAX_WORKER_MODEL_RULES:
+        raise ValueError("worker_models_by_tier must be an object with at most three tiers")
+    result: dict[str, list[str]] = {}
+    for tier, models in value.items():
+        if not isinstance(tier, str) or tier not in {"1", "2", "3"}:
+            raise ValueError("worker_models_by_tier keys must be tier strings 1, 2, or 3")
+        if (
+            not isinstance(models, list)
+            or not models
+            or len(models) > MAX_WORKER_MODELS_PER_TIER
+        ):
+            raise ValueError(
+                "worker_models_by_tier values must be non-empty model lists "
+                f"of at most {MAX_WORKER_MODELS_PER_TIER} entries"
+            )
+        if any(
+            not isinstance(model, str)
+            or not model
+            or len(model) > MAX_WORKER_MODEL_ID_LENGTH
+            or model != model.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in model)
+            for model in models
+        ) or len(set(models)) != len(models):
+            raise ValueError(
+                "worker_models_by_tier model IDs must be unique, exact, "
+                f"non-empty strings of at most {MAX_WORKER_MODEL_ID_LENGTH} characters"
+            )
+        result[tier] = list(models)
+    return {tier: result[tier] for tier in sorted(result)}
 MIN_BROADCAST_REOFFER_S = 60
 MAX_BROADCAST_REOFFER_S = 86_400
 DEFAULT_STALE_AFTER_DAYS = 3
@@ -1815,6 +1851,7 @@ class CentralBoard:
                     "broadcast_reoffer_s": DEFAULT_BROADCAST_REOFFER_S,
                     "second_opinion": True,
                     "fallback_broadcast": True,
+                    "worker_models_by_tier": {},
                 },
                 "scrub_allow_counts": {},
                 "intake_rate_limit_per_hour": DEFAULT_INTAKE_RATE_LIMIT_PER_HOUR,
@@ -1952,6 +1989,9 @@ class CentralBoard:
             or default_ticket_tier not in {1, 2, 3}
         ):
             raise ValueError("board dispatch default_ticket_tier is invalid")
+        dispatch_policy["worker_models_by_tier"] = validate_worker_models_by_tier(
+            dispatch_policy.get("worker_models_by_tier", {})
+        )
         intake_rate_limit = config.setdefault(
             "intake_rate_limit_per_hour", DEFAULT_INTAKE_RATE_LIMIT_PER_HOUR
         )
@@ -4151,6 +4191,20 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             or COORDINATOR_SCOPE in principal.scopes
         )
 
+    def worker_model_matches(
+        document: Mapping[str, Any],
+        ticket: Mapping[str, Any],
+        member: Mapping[str, Any],
+        kind: str,
+    ) -> bool:
+        if kind != "work":
+            return True
+        required_tier = int(ticket.get("tier", default_ticket_tier(document)))
+        allowed = dispatch_policy(document).get("worker_models_by_tier", {}).get(
+            str(required_tier)
+        )
+        return allowed is None or member_capabilities(member).get("model") in allowed
+
     def dispatch_member_matches_requirements(
         document: Mapping[str, Any],
         ticket: Mapping[str, Any],
@@ -4184,6 +4238,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if (
             int(caps["tier_max"]) < required_tier
             or not required_skills.issubset(caps["skills"])
+            or not worker_model_matches(document, ticket, member, kind)
         ):
             return False
         if kind == "work":
@@ -4269,6 +4324,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             failures.append("role_cannot_work")
         if int(caps["tier_max"]) < required_tier:
             failures.append("tier_too_low")
+        if not worker_model_matches(document, ticket, member, kind):
+            failures.append("worker_model_mismatch")
         if missing_skills:
             failures.append("skills_missing")
         if kind == "work" and not caps["can_work"]:
@@ -4314,6 +4371,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         )
         if not live:
             failures.append("not_live")
+        allowed_models = dispatch_policy(document).get(
+            "worker_models_by_tier", {}
+        ).get(str(required_tier)) if kind == "work" else None
         return {
             "schema_version": 1,
             "evaluated_at": iso_at(now),
@@ -4336,8 +4396,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "can_review": bool(caps["can_review"]),
                 "tier_max": int(caps["tier_max"]),
                 "skills": sorted(caps["skills"]),
+                "model": caps.get("model"),
             },
             "ticket_requirements": {
+                "allowed_worker_models": (
+                    list(allowed_models) if allowed_models is not None else None
+                ),
                 "assigned_to_agent_id": assigned,
                 "assigned_to": requested,
                 "assignment_match": assignment_match,
@@ -8159,6 +8223,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         readiness: dict[str, Any] | None = None,
         allow_takeover: bool = False,
         allow_matching_takeover: bool = False,
+        create_board: bool = False,
     ) -> dict[str, Any]:
         """Join or reactivate an identity and return a compact bounded board briefing."""
         board_id = require_id("board_id", board_id)
@@ -8173,6 +8238,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             raise ValueError("allow_takeover must be a boolean")
         if type(allow_matching_takeover) is not bool:
             raise ValueError("allow_matching_takeover must be a boolean")
+        if type(create_board) is not bool:
+            raise ValueError("create_board must be a boolean")
         if allow_takeover and allow_matching_takeover:
             raise ValueError(
                 "allow_takeover and allow_matching_takeover are mutually exclusive"
@@ -8188,6 +8255,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
         role = validate_seat_role(principal, role)
         coordinate_only = role in {"orchestrator", "coordinator"}
+        if create_board and (role != "coordinator" or "board:write" not in principal.scopes):
+            raise PermissionError(
+                "create_board requires an unbound writer onboarding as coordinator"
+            )
+        if create_board and principal.bound_board_id is not None:
+            raise PermissionError("board-bound credentials cannot create boards")
         safe_platform = clean_text("agent_platform", agent_platform, max_length=80)
         safe_focus = clean_text("task_focus", task_focus, max_length=500)
         if allow_matching_takeover and (
@@ -8200,7 +8273,18 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
         def onboard(document: dict[str, Any]) -> dict[str, Any]:
             now = time.time()
-            if coordinate_only:
+            if create_board:
+                if not service.is_fresh(document):
+                    raise PermissionError(
+                        "create_board is allowed only for a genuinely fresh board"
+                    )
+                # Reuse the established atomic fresh-board creator admission.
+                # Only this explicitly requested path changes membership; the
+                # seat itself remains a non-working coordinator.
+                admission_change = ensure_join_admission(
+                    document, principal, now, None, role
+                )
+            elif coordinate_only:
                 service.resolve_board_context(
                     document,
                     principal.principal_id,
@@ -9420,24 +9504,30 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         board_id: str,
         agent_name: str,
         ctx: Context,
-        offer_ttl_s: int = DEFAULT_OFFER_TTL_S,
-        broadcast_reoffer_s: int = DEFAULT_BROADCAST_REOFFER_S,
-        second_opinion: bool = True,
-        fallback_broadcast: bool = True,
+        offer_ttl_s: int | None = None,
+        broadcast_reoffer_s: int | None = None,
+        second_opinion: bool | None = None,
+        fallback_broadcast: bool | None = None,
         default_ticket_tier: int | None = None,
+        worker_models_by_tier: dict[str, list[str]] | None = None,
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
-        """Set per-seat offer expiry and fallback behavior as board admin."""
+        """Set board dispatch policy as an administrator.
+
+        ``worker_models_by_tier`` optionally maps ticket tier strings to the
+        exact worker capability model IDs eligible for that tier. Omitting it
+        retains the current rule; an explicit empty object clears all rules.
+        """
         board_id = require_id("board_id", board_id)
         agent_name = require_id("agent_name", agent_name)
-        if (
+        if offer_ttl_s is not None and (
             isinstance(offer_ttl_s, bool) or not isinstance(offer_ttl_s, int)
             or not MIN_OFFER_TTL_S <= offer_ttl_s <= MAX_OFFER_TTL_S
         ):
             raise ValueError(
                 f"offer_ttl_s must be between {MIN_OFFER_TTL_S} and {MAX_OFFER_TTL_S}"
             )
-        if (
+        if broadcast_reoffer_s is not None and (
             isinstance(broadcast_reoffer_s, bool)
             or not isinstance(broadcast_reoffer_s, int)
             or not MIN_BROADCAST_REOFFER_S
@@ -9448,7 +9538,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "broadcast_reoffer_s must be between "
                 f"{MIN_BROADCAST_REOFFER_S} and {MAX_BROADCAST_REOFFER_S}"
             )
-        if not isinstance(second_opinion, bool) or not isinstance(fallback_broadcast, bool):
+        if (
+            second_opinion is not None and not isinstance(second_opinion, bool)
+        ) or (
+            fallback_broadcast is not None
+            and not isinstance(fallback_broadcast, bool)
+        ):
             raise ValueError("second_opinion and fallback_broadcast must be boolean")
         if default_ticket_tier is not None and (
             isinstance(default_ticket_tier, bool)
@@ -9456,6 +9551,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             or default_ticket_tier not in {1, 2, 3}
         ):
             raise ValueError("default_ticket_tier must be 1, 2, or 3")
+        normalized_worker_models = (
+            validate_worker_models_by_tier(worker_models_by_tier)
+            if worker_models_by_tier is not None
+            else None
+        )
         principal = current_principal()
         require_board_write_or_coordinate(principal)
         now = time.time()
@@ -9464,10 +9564,27 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             actor = require_admin_actor(document, principal, agent_name)
             previous = copy.deepcopy(dispatch_policy(document))
             policy = {
-                "offer_ttl_s": offer_ttl_s,
-                "broadcast_reoffer_s": broadcast_reoffer_s,
-                "second_opinion": second_opinion,
-                "fallback_broadcast": fallback_broadcast,
+                "offer_ttl_s": (
+                    offer_ttl_s if offer_ttl_s is not None
+                    else previous.get("offer_ttl_s", DEFAULT_OFFER_TTL_S)
+                ),
+                "broadcast_reoffer_s": (
+                    broadcast_reoffer_s if broadcast_reoffer_s is not None
+                    else previous.get("broadcast_reoffer_s", DEFAULT_BROADCAST_REOFFER_S)
+                ),
+                "second_opinion": (
+                    second_opinion if second_opinion is not None
+                    else previous.get("second_opinion", True)
+                ),
+                "fallback_broadcast": (
+                    fallback_broadcast if fallback_broadcast is not None
+                    else previous.get("fallback_broadcast", True)
+                ),
+                "worker_models_by_tier": (
+                    normalized_worker_models
+                    if normalized_worker_models is not None
+                    else previous.get("worker_models_by_tier", {})
+                ),
             }
             configured_default = (
                 default_ticket_tier
@@ -9478,14 +9595,19 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 policy["default_ticket_tier"] = configured_default
             document["config"]["dispatch_policy"] = policy
             actor["last_activity_at"] = iso_at(now)
-            return {"previous": previous, "current": policy}
+            released = redispatch_queue(document, now)
+            return {
+                "previous": previous, "current": policy, "released": released,
+            }
 
         result = service.mutate(board_id, set_policy)
+        events = await publish_releases(board_id, result["released"], principal, ctx)
         return {
             "ok": True, "board_id": board_id,
             "dispatch_policy": result["current"],
             "previous_dispatch_policy": result["previous"],
             "changed": result["current"] != result["previous"],
+            "dispatch_events": events,
         }
 
     @tool()
@@ -11104,6 +11226,18 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if ticket.get("parked") is True and not operator_override:
                 return refuse("ticket is parked by the board owner")
             offer_based = dispatch_enabled(document)
+            if (
+                not offer_based
+                and not operator_override
+                and not worker_model_matches(document, ticket, actor, "work")
+            ):
+                diagnostics = dispatch_claim_diagnostics(
+                    document, ticket, actor, now, "work"
+                )
+                return refuse(
+                    "ticket is not eligible for this worker model",
+                    diagnostics=diagnostics,
+                )
             if not offer_based:
                 assigned_identity = ticket.get("assigned_to_agent_id")
                 requested = ticket.get("assigned_to")
@@ -11158,8 +11292,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     or offer.get("agent_id") == actor["agent_id"]
                 )
                 offer_present_or_broadcast = isinstance(offer, Mapping) or broadcast
-                if not operator_override and (
-                    not eligible or not offer_matches or not offer_present_or_broadcast
+                if (
+                    not worker_model_matches(document, ticket, actor, "work")
+                    or (
+                        not operator_override
+                        and (
+                            not eligible or not offer_matches or not offer_present_or_broadcast
+                        )
+                    )
                 ):
                     diagnostics = dispatch_claim_diagnostics(
                         document, ticket, actor, now, "work"

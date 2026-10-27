@@ -171,11 +171,13 @@ from managed_config import (
     board_policy_projection,
     contract as managed_configuration_contract,
     membership_projection,
+    worker_model_policy_projection,
     plan_digest as managed_plan_digest,
     retention_projection,
     validate_board_policy_changes,
     validate_membership_change,
     validate_retention_changes,
+    validate_worker_models_by_tier,
 )
 from source_config import SourceConfigurationStore
 from public_projection import (
@@ -552,6 +554,7 @@ class FleetClient(Protocol):
         offer_ttl_s: int,
         second_opinion: bool,
         fallback_broadcast: bool,
+        worker_models_by_tier: dict[str, list[str]] | None = None,
     ) -> dict[str, Any]: ...
     async def board_claim_ttl_set(self, claim_ttl_s: int) -> dict[str, Any]: ...
     async def board_review_policy_set(self, review_policy: str) -> dict[str, Any]: ...
@@ -5928,10 +5931,15 @@ class FleetFetcher:
             for event in events
             if isinstance(event, dict) and event.get("kind") in offer_kinds
         ][-25:]
+        dispatch_policy = status.get("dispatch_policy", {})
+        if not isinstance(dispatch_policy, dict):
+            dispatch_policy = {}
+        worker_model_policy = worker_model_policy_projection(status)
         return {
             "board_id": board_id,
             "claim_ttl_s": status.get("claim_ttl_s", 900),
-            "dispatch_policy": status.get("dispatch_policy", {}),
+            "dispatch_policy": dispatch_policy,
+            "worker_model_policy": worker_model_policy,
             "unassignable_tickets": unassignable,
             "unclaimed_tickets": status.get("unclaimed_tickets", []),
             "offers": offers,
@@ -5941,7 +5949,7 @@ class FleetFetcher:
 
     async def _managed_board_state(
         self, board_id: str
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         if not BOARD_ID_RE.fullmatch(board_id):
             raise ValueError("invalid board_id")
         active = {active_board for _label, active_board in await self._boards()}
@@ -5950,11 +5958,15 @@ class FleetFetcher:
         async with self._client(board_id) as client:
             status = await client.board_status()
             members = await client.board_members()
-        return board_policy_projection(status), membership_projection(members)
+        return (
+            board_policy_projection(status),
+            membership_projection(members),
+            worker_model_policy_projection(status),
+        )
 
     async def fetch_managed_configuration(self, board_id: str) -> dict[str, Any]:
         """Return one stable, secret-safe Settings backend contract."""
-        board_policy, memberships = await self._managed_board_state(board_id)
+        board_policy, memberships, worker_model_policy = await self._managed_board_state(board_id)
         central_retention = None
         try:
             async with self._client(board_id) as client:
@@ -6013,6 +6025,7 @@ class FleetFetcher:
             board_policy=board_policy,
             memberships=memberships,
             board_butler=board_butler,
+            worker_model_policy=worker_model_policy,
             board_butler_project=project_name,
             board_butler_default_per_hour=default_per_hour,
             central_retention=central_retention,
@@ -6050,7 +6063,7 @@ class FleetFetcher:
             {"board_id", "family", "expected_sha256", "changes"}
             if family == "board_policy"
             else {"board_id", "family", "expected_sha256", "changes"}
-            if family == "central_retention"
+            if family in {"central_retention", "worker_models_by_tier"}
             else {"board_id", "family", "expected_sha256", "change"}
             if family == "membership"
             else set()
@@ -6064,9 +6077,14 @@ class FleetFetcher:
         if not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected):
             raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
         await self._require_board_admin(board_id)
-        board_policy, memberships = await self._managed_board_state(board_id)
+        board_policy, memberships, worker_model_policy = await self._managed_board_state(board_id)
         retention = None
-        if family == "central_retention":
+        if family == "worker_models_by_tier":
+            if not isinstance(request["changes"], Mapping):
+                raise ValueError("worker_models_by_tier changes must be a JSON object")
+            change = validate_worker_models_by_tier(request["changes"])
+            current = worker_model_policy
+        elif family == "central_retention":
             async with self._client(board_id) as client:
                 retention = retention_projection(
                     await client.board_retention_settings_get()
@@ -6074,6 +6092,8 @@ class FleetFetcher:
         current = (
             board_policy
             if family == "board_policy"
+            else worker_model_policy
+            if family == "worker_models_by_tier"
             else retention
             if family == "central_retention"
             else memberships
@@ -6083,7 +6103,14 @@ class FleetFetcher:
             raise ConfigConflictError(
                 "Managed configuration changed; reload before planning"
             )
-        if family == "board_policy":
+        if family == "worker_models_by_tier":
+            after = change
+            details: dict[str, Any] = {
+                "changes": change,
+                "before": worker_model_policy["values"],
+                "after": after,
+            }
+        elif family == "board_policy":
             change = validate_board_policy_changes(request["changes"])
             after = {**board_policy["values"], **change}
             details: dict[str, Any] = {
@@ -6180,9 +6207,11 @@ class FleetFetcher:
             raise ConfigConflictError("Managed configuration plan expired")
         board_id = plan["board_id"]
         await self._require_board_admin(board_id)
-        board_policy, memberships = await self._managed_board_state(board_id)
+        board_policy, memberships, worker_model_policy = await self._managed_board_state(board_id)
         retention = None
-        if plan["family"] == "central_retention":
+        if plan["family"] == "worker_models_by_tier":
+            current = worker_model_policy
+        elif plan["family"] == "central_retention":
             async with self._client(board_id) as client:
                 retention = retention_projection(
                     await client.board_retention_settings_get()
@@ -6190,6 +6219,8 @@ class FleetFetcher:
         current = (
             board_policy
             if plan["family"] == "board_policy"
+            else worker_model_policy
+            if plan["family"] == "worker_models_by_tier"
             else retention
             if plan["family"] == "central_retention"
             else memberships
@@ -6229,6 +6260,18 @@ class FleetFetcher:
                         "Managed board policy apply failed; rollback "
                         + ("succeeded" if rollback["succeeded"] else "failed")
                     )
+            elif plan["family"] == "worker_models_by_tier":
+                policy = await client.board_status()
+                current_dispatch = policy.get("dispatch_policy")
+                if not isinstance(current_dispatch, dict):
+                    current_dispatch = {}
+                await client.board_dispatch_policy_set(
+                    offer_ttl_s=current_dispatch.get("offer_ttl_s", 120),
+                    broadcast_reoffer_s=current_dispatch.get("broadcast_reoffer_s", 600),
+                    second_opinion=current_dispatch.get("second_opinion", True),
+                    fallback_broadcast=current_dispatch.get("fallback_broadcast", True),
+                    worker_models_by_tier=plan["changes"],
+                )
             elif plan["family"] == "central_retention":
                 await client.board_retention_settings_apply(
                     plan["changes"], plan["expected_revision"]
@@ -6245,7 +6288,9 @@ class FleetFetcher:
                     await client.board_member_set_role(
                         change["principal_id"], change["role"]
                     )
-        read_policy, read_memberships = await self._managed_board_state(board_id)
+        read_policy, read_memberships, read_worker_model_policy = (
+            await self._managed_board_state(board_id)
+        )
         if plan["family"] == "central_retention":
             async with self._client(board_id) as client:
                 readback = retention_projection(
@@ -6255,6 +6300,8 @@ class FleetFetcher:
             readback = (
                 read_policy
                 if plan["family"] == "board_policy"
+                else read_worker_model_policy
+                if plan["family"] == "worker_models_by_tier"
                 else read_memberships
             )
         if plan["family"] == "board_policy" and any(
@@ -6267,6 +6314,11 @@ class FleetFetcher:
             for field, value in plan["after"].items()
         ):
             raise RuntimeError("Central retention read-back did not match the plan")
+        if (
+            plan["family"] == "worker_models_by_tier"
+            and readback["values"] != plan["after"]
+        ):
+            raise RuntimeError("Worker model policy read-back did not match the plan")
         if plan["family"] == "membership":
             readback_roles = {
                 row["principal_id"]: row["role"]
@@ -6328,14 +6380,30 @@ class FleetFetcher:
     async def save_dispatch(self, board_id: str, payload: Any) -> dict[str, Any]:
         if not BOARD_ID_RE.fullmatch(board_id):
             raise ValueError("invalid board_id")
-        if not isinstance(payload, dict) or set(payload) != {
+        required_fields = {
             "claim_ttl_s",
             "offer_ttl_s",
             "broadcast_reoffer_s",
             "second_opinion",
             "fallback_broadcast",
-        }:
+        }
+        optional_fields = {"worker_models_by_tier"}
+        if (
+            not isinstance(payload, dict)
+            or not required_fields <= set(payload)
+            or set(payload) - required_fields - optional_fields
+        ):
             raise ValueError("dispatch policy fields are invalid")
+        worker_models_by_tier: dict[str, list[str]] | None = None
+        if "worker_models_by_tier" in payload:
+            raw_models = payload["worker_models_by_tier"]
+            if not isinstance(raw_models, str) or len(raw_models) > 8192:
+                raise ValueError("worker_models_by_tier must be bounded JSON")
+            try:
+                parsed_models = json.loads(raw_models)
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise ValueError("worker_models_by_tier must be valid JSON") from exc
+            worker_models_by_tier = validate_worker_models_by_tier(parsed_models)
         offer_ttl = payload["offer_ttl_s"]
         broadcast_reoffer_s = payload["broadcast_reoffer_s"]
         claim_ttl = payload["claim_ttl_s"]
@@ -6365,16 +6433,26 @@ class FleetFetcher:
         if board_id not in active:
             raise ValueError("board_id is not registry-active")
         async with self._client(board_id) as client:
-            policy_result = await client.board_dispatch_policy_set(
-                offer_ttl_s=offer_ttl,
-                broadcast_reoffer_s=broadcast_reoffer_s,
-                second_opinion=payload["second_opinion"],
-                fallback_broadcast=payload["fallback_broadcast"],
-            )
+            policy_kwargs = {
+                "offer_ttl_s": offer_ttl,
+                "broadcast_reoffer_s": broadcast_reoffer_s,
+                "second_opinion": payload["second_opinion"],
+                "fallback_broadcast": payload["fallback_broadcast"],
+            }
+            if worker_models_by_tier is not None:
+                policy_kwargs["worker_models_by_tier"] = worker_models_by_tier
+            policy_result = await client.board_dispatch_policy_set(**policy_kwargs)
             ttl_result = await client.board_claim_ttl_set(claim_ttl)
+            readback = await client.board_status()
+        dispatch_policy = readback.get("dispatch_policy")
+        if not isinstance(dispatch_policy, dict):
+            dispatch_policy = policy_result.get("dispatch_policy", {})
         return {
             **policy_result,
-            "claim_ttl_s": ttl_result.get("claim_ttl_s", claim_ttl),
+            "dispatch_policy": dispatch_policy,
+            "claim_ttl_s": readback.get(
+                "claim_ttl_s", ttl_result.get("claim_ttl_s", claim_ttl)
+            ),
             "previous_claim_ttl_s": ttl_result.get("previous_claim_ttl_s"),
         }
 

@@ -13,6 +13,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Add optional exact worker model routing by ticket tier, preserving legacy dispatch when no rule is configured. Persisted offers and claims enforce the same rule, policy updates preserve omitted fields, and fleet demand starts only matching worker inventory while reporting unsupported model capacity. A deliberately explicit fresh-board onboarding intent lets an unbound writer/coordinator become first admin without changing coordinator seat capabilities. See [adding agents](docs/guides/adding-agents.md).
+
 ### Fixed
 
 - Make CI fixtures independent of operator Git identity and host interpreter site-packages, regenerate the Python 3.12 CLI reference, and give the one-second Central dispatch-deadline regression test a bounded allowance for loaded event loops without changing runtime timing.
