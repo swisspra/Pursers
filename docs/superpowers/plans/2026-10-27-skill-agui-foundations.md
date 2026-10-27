@@ -92,7 +92,7 @@
 - [x] Clarify Projects: Add work label, explicit current stage/next action, separate publication/QA/security readiness, calm empty-project install guidance. Reuse existing guarded intake entry; do not invent a second submission API or mark a queued request started.
 - [x] Move technical identifiers and all-reported-states into discoverable details; retain important project identity and all controls. Label Central as connection rather than coordinator. Keep removal in secondary actions with existing preview/confirmation.
 - [x] Add minimal responsive layout and focus/press feedback respecting effective theme tokens and reduced motion; mutations remain click/key-triggered. No new UI framework.
-- [ ] Validate DOM behavior and actual rendered desktop/200% zoom/light/dark screens via available browser harness. No fake passing state or model calls. Run affected tests/typecheck, update docs, commit/report.
+- [x] Validate DOM behavior and actual rendered desktop/200% zoom/light/dark screens via available browser harness. No fake passing state or model calls. Run affected tests/typecheck, update docs, commit/report.
 
 ## Integration and gates
 - Root owns supported integration-manifest/component-lock regeneration only if required by deterministic checks, not manual editing. Preserve baseline generator inputs outside this feature.
