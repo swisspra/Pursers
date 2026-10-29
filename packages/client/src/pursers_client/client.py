@@ -602,6 +602,7 @@ class BoardClient:
         http_client: httpx2.AsyncClient | None = None,
         expected_instance_id: str | None = None,
         renewal_source: str | None = None,
+        create_board: bool = False,
     ):
         self.url = url
         self.token = token
@@ -623,6 +624,9 @@ class BoardClient:
         self.readiness = readiness
         self.allow_takeover = allow_takeover
         self.allow_matching_takeover = allow_matching_takeover
+        if type(create_board) is not bool:
+            raise ValueError("create_board must be a boolean")
+        self.create_board = create_board
         self.agent_platform = agent_platform
         self.task_focus = task_focus
         if (
@@ -702,9 +706,22 @@ class BoardClient:
                 "allow_takeover": self.allow_takeover,
                 "allow_matching_takeover": self.allow_matching_takeover,
             }
+            if self.create_board:
+                join_options["create_board"] = True
             if self.readiness is not None:
                 join_options["readiness"] = self.readiness
-            await self.board_join(self.claim_ttl_s, **join_options)
+            if self.create_board:
+                await self.board_onboard(
+                    claim_ttl_s=self.claim_ttl_s,
+                    role=self.role,
+                    capabilities=self.capabilities,
+                    readiness=self.readiness,
+                    allow_takeover=self.allow_takeover,
+                    allow_matching_takeover=self.allow_matching_takeover,
+                    create_board=True,
+                )
+            else:
+                await self.board_join(self.claim_ttl_s, **join_options)
         except BaseException:
             await self._close_transport()
             raise
@@ -928,7 +945,10 @@ class BoardClient:
         readiness: dict[str, Any] | None = None,
         allow_takeover: bool = False,
         allow_matching_takeover: bool = False,
+        create_board: bool = False,
     ) -> dict[str, Any]:
+        if type(create_board) is not bool:
+            raise ValueError("create_board must be a boolean")
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
             "token_budget": token_budget,
@@ -954,6 +974,8 @@ class BoardClient:
             arguments["allow_takeover"] = True
         if allow_matching_takeover:
             arguments["allow_matching_takeover"] = True
+        if create_board:
+            arguments["create_board"] = True
         result = await self._call_refresh("board_onboard", arguments)
         self.identity = JoinedIdentity(
             result["board_id"],
@@ -989,21 +1011,26 @@ class BoardClient:
     async def board_dispatch_policy_set(
         self,
         *,
-        offer_ttl_s: int = 120,
-        broadcast_reoffer_s: int = 600,
-        second_opinion: bool = True,
-        fallback_broadcast: bool = True,
+        offer_ttl_s: int | None = None,
+        broadcast_reoffer_s: int | None = None,
+        second_opinion: bool | None = None,
+        fallback_broadcast: bool | None = None,
         default_ticket_tier: int | None = None,
+        worker_models_by_tier: Mapping[str, list[str]] | None = None,
     ) -> dict[str, Any]:
-        arguments: dict[str, Any] = {
-            "agent_name": self.agent_name,
+        arguments: dict[str, Any] = {"agent_name": self.agent_name}
+        optional = {
             "offer_ttl_s": offer_ttl_s,
             "broadcast_reoffer_s": broadcast_reoffer_s,
             "second_opinion": second_opinion,
             "fallback_broadcast": fallback_broadcast,
+            "default_ticket_tier": default_ticket_tier,
         }
-        if default_ticket_tier is not None:
-            arguments["default_ticket_tier"] = default_ticket_tier
+        arguments.update({key: value for key, value in optional.items() if value is not None})
+        if worker_models_by_tier is not None:
+            arguments["worker_models_by_tier"] = {
+                tier: list(models) for tier, models in worker_models_by_tier.items()
+            }
         return await self._call(
             "board_dispatch_policy_set",
             arguments,

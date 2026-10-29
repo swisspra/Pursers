@@ -22,7 +22,9 @@ SPEC.loader.exec_module(refresh_module)
 def make_seat(tmp_path: Path, *, role: str = "reviewer") -> tuple[Path, bytes]:
     from test_seat_new import args, seat_new, synthetic_jwt
 
-    seat = seat_new.generate(args(tmp_path / "generated", role=role, client="goose"))
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(seat_new, "_validate_interpreter", lambda _python: None)
+        seat = seat_new.generate(args(tmp_path / "generated", role=role, client="goose"))
     token = tmp_path / "generated" / "seat.jwt"
     token.write_text(synthetic_jwt("PR-synthetic-refresh"), encoding="utf-8")
     token.chmod(0o600)

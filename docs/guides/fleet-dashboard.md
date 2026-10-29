@@ -449,12 +449,18 @@ The remaining Config controls are guarded as follows:
   limited to that host's managed Goose configuration. Each job shows progress,
   completion, and any restart prompt above the inventory.
 
-Each board's **Save policy** writes the displayed claim TTL, offer TTL,
-broadcast re-offer delay, second-opinion switch, and fallback-broadcast switch
-through the board-admin-authorized endpoint. Invalid bounds are rejected; a
-successful write says **Policy saved** and refreshes the offers, unassignable
-work, dispatch history, and recent timeline beneath the form. In **Registry
-work trees**, **Create fleet clone** creates the fleet-owned clone when absent;
+Each board's **Save dispatch timing policy** writes the displayed claim TTL,
+offer TTL, broadcast re-offer delay, second-opinion switch, and fallback-broadcast
+switch through the board-admin-authorized endpoint. **Exact worker model routing
+by tier** is configured separately with an immutable preview and apply. Supply
+an object whose keys are exact tier strings `1`, `2`, or `3`; each value is a
+non-empty list of up to 16 exact model IDs (each at most 200 characters). For
+example, `{"1":["azure_ai/deepseek-v4.1-flash"]}` routes tier-1 work to that
+exact model ID. It does not infer aliases or affect reviewers/Butler. An explicit
+`{}` preview clears routing overrides. Invalid JSON, tiers, duplicate IDs, or
+lists are rejected before Central is changed. A successful apply is read back
+from Central. Existing TTL, second-opinion, and fallback-broadcast behavior is
+unchanged. In **Registry work trees**, **Create fleet clone** creates the fleet-owned clone when absent;
 **Fetch and detach origin/main** refreshes an existing clean clone. The button
 refuses unsafe or conflicting Git state, and its success or failure appears at
 the top of Config. Neither action makes the operator checkout writable to

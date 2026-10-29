@@ -25,6 +25,8 @@ from pursers_client.delivery_workflow import (
     resolve_delivery_policy,
 )
 
+from pursers_client.project_workflow import parse_project_workflow, parse_workflow_activation
+
 
 CENTRAL_URL_DEFAULT = "http://127.0.0.1:8766/mcp"
 HOME_BOARD_ID = "pursers"
@@ -140,6 +142,9 @@ def validate_registry(document: Any) -> dict[str, Any]:
             "delivery_policy_group",
             "delivery_policy_activation",
             "final_validation_delivery",
+            "butler_workflow",
+            "butler_workflow_activation",
+            "butler_recovery_policy",
         }
         if (
             not isinstance(entry, dict)
@@ -216,6 +221,36 @@ def validate_registry(document: Any) -> dict[str, Any]:
                 raise RegistryError(
                     f"project {name!r} final_validation_delivery must be require_pass or draft_with_report"
                 )
+        if "butler_workflow" in entry:
+            try:
+                workflow = parse_project_workflow(
+                    entry["butler_workflow"], project_id=name, board_id=entry["board_id"]
+                )
+                if "butler_workflow_activation" in entry:
+                    parse_workflow_activation(
+                        entry["butler_workflow_activation"], workflow
+                    )
+            except ValueError as exc:
+                raise RegistryError(str(exc)) from exc
+        elif "butler_workflow_activation" in entry:
+            raise RegistryError(f"project {name!r} activation requires a workflow")
+        if "butler_recovery_policy" in entry:
+            recovery = entry["butler_recovery_policy"]
+            # Recovery authority remains validated by Butler before execution.
+            # Registry edits preserve this bounded project-scoped configuration.
+            if (not isinstance(recovery, dict)
+                    or type(recovery.get("schema_version")) is not int
+                    or recovery["schema_version"] != 1
+                    or recovery.get("project_id", name) != name
+                    or recovery.get("board_id", entry["board_id"]) != entry["board_id"]
+                    or ("enabled" in recovery and type(recovery["enabled"]) is not bool)):
+                raise RegistryError(f"project {name!r} recovery metadata is invalid")
+            try:
+                encoded_recovery = json.dumps(recovery, allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                raise RegistryError(f"project {name!r} recovery metadata is invalid") from exc
+            if len(encoded_recovery.encode("utf-8")) > 65536:
+                raise RegistryError(f"project {name!r} recovery metadata is too large")
         if "delivery_policy_activation" in entry:
             try:
                 entry["delivery_policy_activation"] = parse_delivery_policy_activation(

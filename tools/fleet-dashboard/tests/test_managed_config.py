@@ -32,6 +32,7 @@ class ManagedClient:
         self.fail_stale = False
         self.membership_behavior = "normal"
         self.retention_revision = 0
+        self.worker_models_by_tier: dict[str, list[str]] = {}
         self.retention = {
             "archive_after_days": 2,
             "inline_history_limit": 50,
@@ -89,7 +90,19 @@ class ManagedClient:
             "board_id": "pursers",
             "review_policy": self.review_policy,
             "stale_after_days": self.stale_after_days,
+            "dispatch_policy": {
+                "worker_models_by_tier": self.worker_models_by_tier,
+                "offer_ttl_s": 120,
+                "broadcast_reoffer_s": 600,
+                "second_opinion": True,
+                "fallback_broadcast": True,
+            },
         }
+
+    async def board_dispatch_policy_set(self, **kwargs: object) -> dict:
+        if "worker_models_by_tier" in kwargs:
+            self.worker_models_by_tier = kwargs["worker_models_by_tier"]
+        return {"ok": True, "dispatch_policy": dict(kwargs)}
 
     async def board_members(self) -> dict:
         return {
@@ -225,6 +238,73 @@ def test_managed_contract_is_typed_and_redacts_references() -> None:
     )
     assert result["families"]["central_retention"]["status"] == "configurable"
     assert result["families"]["central_retention"]["maintenance_runs_on_apply"] is False
+    assert result["families"]["dispatch"]["values"] == {}
+    assert result["families"]["dispatch"]["source"] == "Central board dispatch policy"
+
+
+def test_worker_model_policy_plan_apply_clears_and_reads_back_exact_values() -> None:
+    client = ManagedClient()
+    fetcher = make_fetcher(client)
+
+    async def scenario() -> None:
+        initial = await fetcher.fetch_managed_configuration("pursers")
+        family = initial["families"]["dispatch"]
+        assert family["values"] == {}
+        model_policy = {"1": ["azure_ai/deepseek-v4.1-flash"], "3": ["exact/model"]}
+        plan = await fetcher.prepare_managed_configuration(
+            {
+                "board_id": "pursers",
+                "family": "worker_models_by_tier",
+                "expected_sha256": family["expected_sha256"],
+                "changes": model_policy,
+            }
+        )
+        assert plan["before"] == {}
+        assert plan["after"] == model_policy
+        receipt = await fetcher.apply_managed_configuration(
+            plan["plan_id"], plan["digest"]
+        )
+        assert receipt["readback"]["values"] == model_policy
+        assert client.worker_models_by_tier == model_policy
+        projected = await fetcher.fetch_managed_configuration("pursers")
+        assert projected["families"]["dispatch"]["values"] == model_policy
+        assert projected["families"]["dispatch"]["expected_sha256"] != family["expected_sha256"]
+
+        clear = await fetcher.prepare_managed_configuration(
+            {
+                "board_id": "pursers",
+                "family": "worker_models_by_tier",
+                "expected_sha256": projected["families"]["dispatch"]["expected_sha256"],
+                "changes": {},
+            }
+        )
+        cleared = await fetcher.apply_managed_configuration(
+            clear["plan_id"], clear["digest"]
+        )
+        assert cleared["readback"]["values"] == {}
+        assert client.worker_models_by_tier == {}
+
+        for invalid in (
+            {"4": ["model"]},
+            {1: ["model"]},
+            {"1": []},
+            {"1": ["model", "model"]},
+            {"1": [" model"]},
+            {"1": ["x" * 201]},
+            {"1": ["bad\x7fmodel"]},
+            {"1": ["model"] * 17},
+        ):
+            with pytest.raises(ValueError, match="worker_models_by_tier"):
+                await fetcher.prepare_managed_configuration(
+                    {
+                        "board_id": "pursers",
+                        "family": "worker_models_by_tier",
+                        "expected_sha256": cleared["readback"]["expected_sha256"],
+                        "changes": invalid,
+                    }
+                )
+
+    asyncio.run(scenario())
 
 
 def test_board_policy_plan_apply_reads_back_and_rejects_stale_source() -> None:
@@ -267,7 +347,7 @@ def test_board_policy_failed_apply_rolls_back_prior_field() -> None:
     fetcher = make_fetcher(client)
 
     async def scenario() -> None:
-        current, _members = await fetcher._managed_board_state("pursers")
+        current, _members, _worker_model_policy = await fetcher._managed_board_state("pursers")
         plan = await fetcher.prepare_managed_configuration(
             {
                 "board_id": "pursers",
@@ -319,7 +399,7 @@ def test_membership_plan_apply_uses_exact_principal_and_readback() -> None:
     fetcher = make_fetcher(client)
 
     async def scenario() -> None:
-        _policy, members = await fetcher._managed_board_state("pursers")
+        _policy, members, _worker_model_policy = await fetcher._managed_board_state("pursers")
         plan = await fetcher.prepare_managed_configuration(
             {
                 "board_id": "pursers",
@@ -359,7 +439,7 @@ def test_membership_apply_rejects_bad_readback_and_restores_before_state(
     fetcher = make_fetcher(client)
 
     async def scenario() -> None:
-        _policy, members = await fetcher._managed_board_state("pursers")
+        _policy, members, _worker_model_policy = await fetcher._managed_board_state("pursers")
         change = {"operation": operation, "principal_id": principal_id}
         if role is not None:
             change["role"] = role

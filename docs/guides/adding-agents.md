@@ -49,6 +49,35 @@ The reviewer must use a different credential and principal from the worker.
 Changing only `agent_name` does not make a review independent: two names that
 authenticate with the same credential still have the same principal.
 
+### One-shot dispatch policy maintenance for existing boards
+
+The resident Butler can initialize dispatch policy while onboarding a new
+board, but ordinary refreshes must not overwrite later administrator edits.
+To deliberately apply configured `default_ticket_tier` and
+`worker_models_by_tier` fields to already registered source boards, first stop
+the normal resident Butler service. Run the same configured
+`board_butler.py` command with `--apply-intake-dispatch-policy-once` and the
+existing `--intake-onboarding-config` path; add `--dry-run` first to preview
+with zero mutations. For example, preserve the service's normal URL, token
+path, home board, agent name, repository, pid file, and cursor file arguments,
+and use:
+
+```bash
+python3 tools/board-butler/board_butler.py <same configured arguments> \\
+  --intake-onboarding-config /PATH/TO/private/intake-onboarding.json \\
+  --apply-intake-dispatch-policy-once --dry-run
+```
+
+After reviewing the bounded report, repeat without `--dry-run` to apply, then
+restart the resident service. The command uses the Butler's own configured
+credential and normal administrator checks; never copy its token. Only exact
+project names in the source `repositories` mapping that resolve to one active
+registry board are considered. Unmapped, inactive, ambiguous, or conflicting
+routes are skipped or reported as failures. Omitted dispatch fields are
+preserved, while an explicit empty `worker_models_by_tier` object clears that
+field. No other dispatch settings are changed, and this one-shot operation
+does not run intake, model, or fleet work.
+
 ### Display names are presentation only
 
 `agent_name` is the stable operational name used to derive `agent_id`; keep it
@@ -328,6 +357,39 @@ Reuse each stable `agent_name` after restarts. If you intentionally reconnect
 the same seat while Central still considers it active, use
 `allow_takeover=true`. Never use takeover to borrow another seat's name.
 
+## Configure exact worker models for ticket tiers
+
+Board administrators may optionally restrict workers for a tier to exact model
+IDs advertised in each worker's capabilities. Use the existing dispatch policy
+setter; model IDs are case-sensitive and are not inferred from provider names.
+A configured rule has no cross-model fallback: missing or mismatching worker
+models are ineligible, while reviewer eligibility and tiers without a rule keep
+their existing behavior. Omit `worker_models_by_tier` to retain the current
+rules; pass `{}` explicitly to clear them. Each tier key is the string `1`, `2`,
+or `3`, with 1–16 unique model IDs (maximum 200 characters each).
+
+```text
+board_dispatch_policy_set(
+  board_id="quickstart",
+  agent_name="admin-agent",
+  worker_models_by_tier={"1": ["azure_ai/deepseek-v4.1-flash"]}
+)
+```
+
+This setting does not provision a matching worker. Operators must separately
+bind an approved, signed worker template to an appropriate provider/model and
+verify that it advertises the exact configured capability model. Until eligible
+inventory is available, workers using other models cannot claim the configured
+tier and capacity diagnostics identify the unsupported requirement.
+
+For an intentionally fresh board only, a verified unbound principal with
+`board:write` and coordinator role may request first-owner admission by passing
+`create_board=true` to `board_onboard`. The option defaults to false. It is
+rejected for existing boards and board-bound credentials; the resulting seat
+remains a non-working, non-reviewing coordinator. Ordinary joins and the
+existing board-admin authorization checks are unchanged. Do not use this option
+to recover a board or promote an existing member.
+
 ## 5. Prove independent review
 
 Use synthetic content on the local board:
@@ -440,3 +502,33 @@ submission principal.
 A coordinator needs `board:coordinate`, an existing `member` or `admin`
 membership, and `role=coordinator` on `board_onboard`. A coordinator cannot use
 an invite to create its own membership.
+
+### Restrict workers to exact models by ticket tier
+
+Board administrators can optionally set `worker_models_by_tier` with
+`board_dispatch_policy_set`, for example:
+
+```json
+{"worker_models_by_tier":{"1":["azure_ai/deepseek-v4.1-flash"]}}
+```
+
+Keys are ticket tier strings (`"1"`, `"2"`, or `"3"`); each value is a
+bounded, non-empty list of exact model IDs advertised by worker capabilities.
+A configured tier fails closed for seats whose model is missing or does not
+match exactly. There is no provider-name or substring matching, and no fallback
+to another model. Tiers without a rule retain their existing behavior;
+reviewers are unaffected. Omitting this optional argument when updating other
+dispatch settings retains the current rule; pass `{}` explicitly to clear all
+rules. Read back the effective policy with `board_status`.
+
+A policy does not create or reconfigure worker templates. Before restricting a
+tier, make sure the approved fleet inventory actually contains a worker
+advertising one of its exact model IDs; otherwise that tier reports no eligible
+worker until matching capacity is available.
+
+For a genuinely new board only, an unbound credential with both `board:write`
+and coordinator scope can explicitly request `create_board=true` on
+`board_onboard` while joining with `role=coordinator`. This atomically admits
+the principal as the first board administrator but leaves the runtime seat
+non-working and non-reviewing. The intent defaults off; existing boards,
+board-bound credentials, and credentials without writer scope cannot use it.

@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import Iterator
 
 import jwt
+import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
 
@@ -86,7 +87,14 @@ def _credential(root: Path, issuer: str, audience: str) -> tuple[str, str]:
     return token, principal_id
 
 
-async def _seed_board(data_root: Path, port: int, principal_id: str) -> None:
+async def _seed_board(
+    data_root: Path,
+    port: int,
+    principal_id: str,
+    *,
+    butler_membership_role: str = "admin",
+    runtime_metadata: bool = False,
+) -> None:
     mcp, service = central.build_server("127.0.0.1", port, data_root)
     admin = central.Principal(
         "PR-real-join-admin",
@@ -113,7 +121,7 @@ async def _seed_board(data_root: Path, port: int, principal_id: str) -> None:
                 "board_id": "butler-real-join",
                 "agent_name": "bootstrap-admin",
                 "principal_id": principal_id,
-                "role": "admin",
+                "role": butler_membership_role,
             },
         )
         assert not admitted.is_error
@@ -130,6 +138,33 @@ async def _seed_board(data_root: Path, port: int, principal_id: str) -> None:
         assert not butler_join.is_error
         butler_agent_id = butler_join.structured_content["agent_id"]
         current[0] = admin
+        second_admin = await mcp.call_tool(
+            "board_join",
+            {"board_id": "butler-second-board", "agent_name": "bootstrap-second-admin"},
+        )
+        assert not second_admin.is_error
+        second_membership = await mcp.call_tool(
+            "board_member_add",
+            {
+                "board_id": "butler-second-board",
+                "agent_name": "bootstrap-second-admin",
+                "principal_id": principal_id,
+                "role": butler_membership_role,
+            },
+        )
+        assert not second_membership.is_error
+        current[0] = butler_principal
+        second_butler = await mcp.call_tool(
+            "board_join",
+            {
+                "board_id": "butler-second-board",
+                "agent_name": "board-butler-real-join",
+                "role": "coordinator",
+                "capabilities": dict(butler.BOARD_BUTLER_CAPABILITIES),
+            },
+        )
+        assert not second_butler.is_error
+        current[0] = admin
         for key, value in (
             (
                 "project_registry",
@@ -140,7 +175,18 @@ async def _seed_board(data_root: Path, port: int, principal_id: str) -> None:
                             "board_id": "butler-real-join",
                             "work_dir": "/PATH/TO/Pursers",
                             "status": "active",
-                        }
+                        },
+                        "second": {
+                            "board_id": "butler-second-board",
+                            "work_dir": "/PATH/TO/SecondProject",
+                            "status": "active",
+                        },
+                        **({"workflow-metadata": {
+                            "board_id": "other-workflow-board",
+                            "work_dir": "/PATH/TO/WorkflowProject",
+                            "status": "paused",
+                            "butler_recovery_policy": {"schema_version": 1, "enabled": False},
+                        }} if runtime_metadata else {}),
                     },
                 },
             ),
@@ -881,6 +927,186 @@ def test_butler_reaches_first_working_state_against_real_central(
 
     with _central_process(data_root, port, environment) as url:
         asyncio.run(connect(url))
+
+
+def test_existing_dispatch_policy_maintenance_uses_existing_central_board(
+    tmp_path: Path, capsys
+) -> None:
+    port = _free_port()
+    issuer = f"http://127.0.0.1:{port}"
+    audience = f"{issuer}/mcp"
+    token, principal_id = _credential(tmp_path, issuer, audience)
+    token_path = tmp_path / "butler.token"
+    token_path.write_text(token, encoding="utf-8")
+    token_path.chmod(0o600)
+    config_path = tmp_path / "intake-onboarding.json"
+    data_root = tmp_path / "central-data"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CENTRAL_AUTH_MODE": "jwt",
+            "CENTRAL_JWT_ISSUER": issuer,
+            "CENTRAL_JWT_AUDIENCE": audience,
+            "CENTRAL_JWKS_PATH": str(tmp_path / "jwks.json"),
+            "CENTRAL_ADMISSION": "invite",
+            "STORE_BACKEND": "sqlite",
+        }
+    )
+    previous = os.environ.copy()
+    os.environ.update(environment)
+    try:
+        asyncio.run(_seed_board(data_root, port, principal_id, runtime_metadata=True))
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
+
+    def write_policy(
+        *, include_tier: bool, models: dict[str, list[str]], include_second: bool = True
+    ) -> None:
+        repositories = {"butler-real-join": "https://example.invalid/repo.git"}
+        if include_second:
+            repositories["second"] = "https://example.invalid/second.git"
+        source: dict[str, object] = {
+            "domain": "work",
+            "projects_root": str(tmp_path / "projects"),
+            "auto_onboard": False,
+            "per_cycle_cap": 1,
+            "repositories": repositories,
+            "worker_models_by_tier": models,
+        }
+        if include_tier:
+            source["default_ticket_tier"] = 3
+        config_path.write_text(
+            json.dumps({"sources": {"source": source}}), encoding="utf-8"
+        )
+
+    def options(url: str, *, home_board: str = "butler-real-join") -> SimpleNamespace:
+        return SimpleNamespace(
+            url=url,
+            home_board=home_board,
+            agent_name="board-butler-real-join",
+            token_path=token_path,
+            intake_onboarding_config=config_path,
+            apply_intake_dispatch_policy_once=True,
+            dry_run=True,
+            kill_switch=False,
+            veto_question=None,
+            repo=REPOSITORY_ROOT,
+            pid_file=tmp_path / "butler.pid",
+        )
+
+    async def exercise(url: str) -> None:
+        write_policy(include_tier=True, models={"1": ["model-a"]})
+        async with butler.CentralBackend(options(url), token) as backend:
+            registry_before = await backend.client.board_state_get("project_registry")
+            before = (await backend.client._call("board_status", {}))["dispatch_policy"]
+            assert await backend.apply_existing_dispatch_policy(dry_run=True) == 0
+            preview = json.loads(capsys.readouterr().out)
+            after_preview = (await backend.client._call("board_status", {}))["dispatch_policy"]
+            assert len(preview["results"]) == 2
+            assert {row["board_id"] for row in preview["results"]} == {
+                "butler-real-join", "butler-second-board"
+            }
+            assert all(row["status"] == "would_change" for row in preview["results"])
+            assert after_preview == before
+
+            assert await backend.apply_existing_dispatch_policy(dry_run=False) == 0
+            applied = json.loads(capsys.readouterr().out)
+            after_apply = (await backend.client._call("board_status", {}))["dispatch_policy"]
+            assert applied["results"][0]["status"] == "changed"
+            assert after_apply["default_ticket_tier"] == 3
+            assert after_apply["worker_models_by_tier"] == {"1": ["model-a"]}
+            assert after_apply["offer_ttl_s"] == before["offer_ttl_s"]
+            assert after_apply["second_opinion"] == before["second_opinion"]
+
+            async with backend._client_for_board("butler-second-board") as second_client:
+                second_before = (await second_client._call("board_status", {}))["dispatch_policy"]
+            assert applied["results"][1]["status"] == "changed"
+            assert await backend.apply_existing_dispatch_policy(dry_run=False) == 0
+            no_op = json.loads(capsys.readouterr().out)
+            assert all(row["status"] == "unchanged" for row in no_op["results"])
+            registry_after = await backend.client.board_state_get("project_registry")
+            assert registry_after["state"]["value"] == registry_before["state"]["value"]
+
+        write_policy(include_tier=False, models={}, include_second=False)
+        async with butler.CentralBackend(options(url), token) as backend:
+            assert await backend.apply_existing_dispatch_policy(dry_run=False) == 0
+            cleared = json.loads(capsys.readouterr().out)
+            assert cleared["results"][0]["status"] == "changed"
+            after_clear = (await backend.client._call("board_status", {}))["dispatch_policy"]
+            assert after_clear["worker_models_by_tier"] == {}
+            assert after_clear["default_ticket_tier"] == 3
+
+    with _central_process(data_root, port, environment) as url:
+        asyncio.run(exercise(url))
+
+    # Authenticate a real admitted member, then prove the admin-only update is
+    # refused. A broken JWT must not count as an authorization test.
+    denied_root = tmp_path / "denied-central-data"
+    denied_keys = tmp_path / "denied-credentials"
+    denied_keys.mkdir()
+    denied_port = _free_port()
+    denied_issuer = f"http://127.0.0.1:{denied_port}"
+    denied_token, denied_principal_id = _credential(
+        denied_keys, denied_issuer, f"{denied_issuer}/mcp"
+    )
+    denied_env = {
+        **environment,
+        "CENTRAL_JWT_ISSUER": denied_issuer,
+        "CENTRAL_JWT_AUDIENCE": f"{denied_issuer}/mcp",
+        "CENTRAL_JWKS_PATH": str(denied_keys / "jwks.json"),
+    }
+    write_policy(include_tier=True, models={"1": ["model-a"]}, include_second=False)
+    denied_policy = tmp_path / "denied-onboarding.json"
+    denied_policy.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+    previous = os.environ.copy()
+    os.environ.update(denied_env)
+    try:
+        asyncio.run(_seed_board(
+            denied_root, denied_port, denied_principal_id,
+            butler_membership_role="member",
+        ))
+        with _central_process(denied_root, denied_port, denied_env) as denied_url:
+            denied_options = options(denied_url)
+            denied_options.intake_onboarding_config = denied_policy
+            denied_options.dry_run = False
+
+            async def denied_operation() -> None:
+                from pursers_client import BoardClient
+
+                async def observe() -> tuple[dict, str]:
+                    async with BoardClient(
+                        denied_url, denied_token, "butler-real-join",
+                        agent_name="board-butler-real-join",
+                        role="coordinator",
+                        capabilities=dict(butler.BOARD_BUTLER_CAPABILITIES),
+                        allow_takeover=True,
+                        create_board=False,
+                    ) as member_client:
+                        policy = (await member_client._call("board_status", {}))["dispatch_policy"]
+                        members = (await member_client._call("board_members", {}))["members"]
+                        membership = next(
+                            row["role"] for row in members
+                            if row["principal_id"] == denied_principal_id
+                        )
+                        return policy, membership
+
+                before, membership = await observe()
+                assert membership == "member"
+                assert before.get("worker_models_by_tier", {}) == {}
+                async with butler.CentralBackend(denied_options, denied_token) as backend:
+                    assert await backend.apply_existing_dispatch_policy(dry_run=False) == 1
+                result = json.loads(capsys.readouterr().out)
+                assert len(result["results"]) == 1
+                assert result["results"][0]["status"] == "failed"
+                after, membership = await observe()
+                assert after == before
+                assert membership == "member"
+
+            asyncio.run(denied_operation())
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
 
 
 def test_real_central_multiboard_operations_keep_exact_board_context(

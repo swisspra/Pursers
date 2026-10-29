@@ -820,11 +820,11 @@ usage: board_butler.py [-h] [--url URL] [--token-path TOKEN_PATH] [--home-board 
                        [--intake-onboarding-config INTAKE_ONBOARDING_CONFIG] [--drafts-per-hour DRAFTS_PER_HOUR]
                        [--drafts-per-ticket DRAFTS_PER_TICKET] [--drafts-per-board DRAFTS_PER_BOARD]
                        [--project PROJECT] [--wait-timeout WAIT_TIMEOUT] [--refresh-seconds REFRESH_SECONDS]
-                       [--approval-scan-budget APPROVAL_SCAN_BUDGET] [--act-on-board BOARD_ID]
+                       [--approval-scan-budget APPROVAL_SCAN_BUDGET] [--act-on-board BOARD_ID] [--act-on-registry]
                        [--no-live-candidates-cycles NO_LIVE_CANDIDATES_CYCLES]
                        [--active-action {park_no_live_candidates,refuse_incapable_target}]
-                       [--action-hold-seconds ACTION_HOLD_SECONDS] [--once] [--dry-run]
-                       [--kill-switch | --veto-question VETO_QUESTION] [--control-reason CONTROL_REASON]
+                       [--action-hold-seconds ACTION_HOLD_SECONDS] [--once] [--apply-intake-dispatch-policy-once]
+                       [--dry-run] [--kill-switch | --veto-question VETO_QUESTION] [--control-reason CONTROL_REASON]
 
 Registry-wide coordinator findings refresher and policy-gated question answerer. The butler runs the real coordinator
 derivation for every active registry board on a bounded cycle and listens for coordinator questions through the same
@@ -880,6 +880,8 @@ options:
   --act-on-board BOARD_ID
                         explicitly opt one active registry board into the two mechanical ticket actions; repeat for
                         multiple boards
+  --act-on-registry     explicitly opt all current and future active registry boards into the two mechanical actions;
+                        requires active runtime authorization
   --no-live-candidates-cycles NO_LIVE_CANDIDATES_CYCLES
   --active-action {park_no_live_candidates,refuse_incapable_target}
                         enabled autonomous action class; repeat to configure the acting set (defaults to the two
@@ -887,6 +889,8 @@ options:
   --action-hold-seconds ACTION_HOLD_SECONDS
                         veto window before an enabled mechanical action can execute
   --once
+  --apply-intake-dispatch-policy-once
+                        explicitly apply configured dispatch policies to already registered source boards, then exit
   --dry-run
   --kill-switch
   --veto-question VETO_QUESTION

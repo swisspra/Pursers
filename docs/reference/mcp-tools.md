@@ -53,6 +53,7 @@ Required authorization: `board:read`; a valid invite is also required for a new 
 | `readiness` | `object | null` | optional | `null` |
 | `allow_takeover` | `boolean` | optional | `false` |
 | `allow_matching_takeover` | `boolean` | optional | `false` |
+| `create_board` | `boolean` | optional | `false` |
 
 Response fields: `ok, board_id, agent_id, agent_name, profile, principal_id, role, membership_role, lifecycle_status, capabilities, readiness, generation_token, generation_revision, rejoined, claim_ttl_s, renewed_ticket_ids, renewed_leases, release_events, lifecycle_event, admission_event, snapshot, briefing`.
 
@@ -1152,7 +1153,7 @@ Response fields: `ok, board_id, journal_retention_days, previous_journal_retenti
 
 ### `board_dispatch_policy_set`
 
-Set per-seat offer expiry and fallback behavior as board admin.
+Set board dispatch policy as an administrator. ``worker_models_by_tier`` optionally maps ticket tier strings to the exact worker capability model IDs eligible for that tier. Omitting it retains the current rule; an explicit empty object clears all rules.
 
 Required authorization: `board:write` as admin, or `board:coordinate`.
 
@@ -1160,14 +1161,15 @@ Required authorization: `board:write` as admin, or `board:coordinate`.
 |---|---|---|---|
 | `board_id` | `string` | required | — |
 | `agent_name` | `string` | required | — |
-| `offer_ttl_s` | `integer` | optional | `120` |
-| `broadcast_reoffer_s` | `integer` | optional | `600` |
-| `second_opinion` | `boolean` | optional | `true` |
-| `fallback_broadcast` | `boolean` | optional | `true` |
+| `offer_ttl_s` | `integer | null` | optional | `null` |
+| `broadcast_reoffer_s` | `integer | null` | optional | `null` |
+| `second_opinion` | `boolean | null` | optional | `null` |
+| `fallback_broadcast` | `boolean | null` | optional | `null` |
 | `default_ticket_tier` | `integer | null` | optional | `null` |
+| `worker_models_by_tier` | `object[string, array[string]] | null` | optional | `null` |
 | `expected_generation` | `string | null` | optional | `null` |
 
-Response fields: `ok, board_id, dispatch_policy, previous_dispatch_policy, changed`.
+Response fields: `ok, board_id, dispatch_policy, previous_dispatch_policy, changed, dispatch_events`.
 
 ### `board_claim_ttl_set`
 

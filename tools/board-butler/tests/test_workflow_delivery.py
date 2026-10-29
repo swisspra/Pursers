@@ -622,7 +622,8 @@ def test_prepared_actual_head_drift_is_rejected_even_with_matching_ledger_sha(re
     git(repo["clone"], "checkout", "-b", "drift", prepared["combined_revision"])
     (repo["clone"] / "drift.txt").write_text("integration ref moved after preparation\\n")
     git(repo["clone"], "add", "drift.txt")
-    git(repo["clone"], "commit", "-m", "drift integration ref")
+    git(repo["clone"], "-c", "user.name=QA Fixture", "-c",
+        "user.email=qa@example.invalid", "commit", "-m", "drift integration ref")
     drift = git(repo["clone"], "rev-parse", "HEAD")
     git(repo["clone"], "push", "origin", f"HEAD:refs/heads/{policy['integration_branch']}")
     assert drift != prepared["combined_revision"]

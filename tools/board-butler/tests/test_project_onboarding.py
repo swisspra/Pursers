@@ -39,7 +39,11 @@ class FakeRegistry:
         return copy.deepcopy(self.document), self.digest()
 
     async def ensure_board(
-        self, board_id: str, domain: str, default_ticket_tier: int | None = None
+        self,
+        board_id: str,
+        domain: str,
+        default_ticket_tier: int | None = None,
+        worker_models_by_tier: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         self.boards.append((board_id, domain))
 
@@ -277,7 +281,56 @@ def test_config_requires_absolute_root_and_rejects_credentials(tmp_path: Path) -
     with pytest.raises(ValueError):
         onboarding.parse_source_policies(tiered)
 
-    aliases = copy.deepcopy(base)
+
+def test_worker_models_by_tier_are_validated_and_exposed_by_source_inspection(
+    tmp_path: Path,
+) -> None:
+    remote = make_remote(tmp_path, "model-policy")
+    document = {
+        "sources": {
+            "sonarqube": {
+                "domain": "work",
+                "projects_root": str(tmp_path / "projects"),
+                "auto_onboard": True,
+                "per_cycle_cap": 2,
+                "retry_limit": 3,
+                "retry_backoff_s": 30,
+                "repositories": {
+                    "alpha": {
+                        "repository_url": str(remote),
+                        "integration_ref": "main",
+                    }
+                },
+                "worker_models_by_tier": {
+                    "1": ["azure_ai/deepseek-v4.1-flash"]
+                },
+            }
+        },
+    }
+    parsed = onboarding.parse_source_policies(document)
+    assert parsed["sonarqube"].worker_models_by_tier == {
+        "1": ("azure_ai/deepseek-v4.1-flash",)
+    }
+    inspected = onboarding.inspect_source_onboarding_configuration(document)
+    assert inspected.effective["sources"]["sonarqube"]["worker_models_by_tier"] == {
+        "1": ["azure_ai/deepseek-v4.1-flash"]
+    }
+
+    for invalid in (
+        {"0": ["model"]},
+        {"1": []},
+        {"1": ["model", "model"]},
+        {"1": [" model"]},
+        {"1": ["m" * 201]},
+        {"1": ["model\n"]},
+        {"1": ["m" * 200] * 17},
+    ):
+        candidate = copy.deepcopy(document)
+        candidate["sources"]["sonarqube"]["worker_models_by_tier"] = invalid
+        with pytest.raises(ValueError, match="worker_models_by_tier"):
+            onboarding.parse_source_policies(candidate)
+
+    aliases = copy.deepcopy(document)
     source = aliases["sources"]["sonarqube"]
     source["repository_map"] = {
         "alpha": source.pop("repositories")["alpha"]["repository_url"]
@@ -290,19 +343,19 @@ def test_config_requires_absolute_root_and_rejects_credentials(tmp_path: Path) -
     assert alias_policy.retry_limit == 3
     assert alias_policy.retry_backoff_s == 60
 
-    relative = copy.deepcopy(base)
+    relative = copy.deepcopy(document)
     relative["sources"]["sonarqube"]["projects_root"] = "relative/projects"
     with pytest.raises(ValueError, match="must be absolute"):
         onboarding.parse_source_policies(relative)
 
-    credential = copy.deepcopy(base)
+    credential = copy.deepcopy(document)
     credential["sources"]["sonarqube"]["repositories"]["alpha"][
         "repository_url"
     ] = "https://user:secret@example.invalid/alpha.git"
     with pytest.raises(ValueError, match="credentials"):
         onboarding.parse_source_policies(credential)
 
-    configured = copy.deepcopy(base)
+    configured = copy.deepcopy(document)
     configured["sources"]["sonarqube"].update(
         delivery_policy_group="backend",
         delivery_policy={"mode": "batch_pr", "release_trigger": {"kind": "manual"}},
@@ -313,12 +366,12 @@ def test_config_requires_absolute_root_and_rejects_credentials(tmp_path: Path) -
     assert configured_policy.delivery_policy["mode"] == "batch_pr"
     assert configured_policy.activate_delivery_policy is True
 
-    invalid_activation = copy.deepcopy(base)
+    invalid_activation = copy.deepcopy(document)
     invalid_activation["sources"]["sonarqube"]["activate_delivery_policy"] = "yes"
     with pytest.raises(ValueError, match="activate_delivery_policy must be boolean"):
         onboarding.parse_source_policies(invalid_activation)
 
-    weakening = copy.deepcopy(base)
+    weakening = copy.deepcopy(document)
     weakening["sources"]["sonarqube"]["delivery_policy"] = {
         "validation": {"require_upstream_policies": False}
     }

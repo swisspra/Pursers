@@ -135,6 +135,51 @@ def validate_board_policy_changes(value: Any) -> dict[str, Any]:
     return clean
 
 
+def validate_worker_models_by_tier(value: Any) -> dict[str, list[str]]:
+    """Validate exact model IDs without inferring provider names or fallbacks."""
+    if not isinstance(value, Mapping) or len(value) > 3:
+        raise ValueError("worker_models_by_tier must be an object with at most three tiers")
+    result: dict[str, list[str]] = {}
+    for tier, models in value.items():
+        if not isinstance(tier, str) or tier not in {"1", "2", "3"}:
+            raise ValueError("worker_models_by_tier keys must be tier strings 1, 2, or 3")
+        if (
+            not isinstance(models, list)
+            or not 1 <= len(models) <= 16
+            or any(
+                not isinstance(model, str)
+                or not model
+                or model != model.strip()
+                or len(model) > 200
+                or any(ord(char) < 32 or ord(char) == 127 for char in model)
+                for model in models
+            )
+            or len(set(models)) != len(models)
+        ):
+            raise ValueError(
+                "worker_models_by_tier values must be unique, exact, non-empty model lists"
+            )
+        result[tier] = list(models)
+    return {tier: result[tier] for tier in sorted(result)}
+
+
+def worker_model_policy_projection(status: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and fingerprint the current worker model dispatch rules."""
+    policy = status.get("dispatch_policy", {})
+    if not isinstance(policy, Mapping):
+        raise ValueError("Central returned a malformed dispatch policy")
+    values = validate_worker_models_by_tier(
+        policy.get("worker_models_by_tier", {})
+    )
+    return {
+        "status": "configurable",
+        "apply_mode": "hot-apply",
+        "source": "Central board dispatch policy",
+        "values": values,
+        "expected_sha256": _digest(values),
+    }
+
+
 def membership_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
     rows = payload.get("members", [])
     if not isinstance(rows, list):
@@ -360,6 +405,7 @@ def contract(
     board_policy: Mapping[str, Any],
     memberships: Mapping[str, Any],
     board_butler: Any,
+    worker_model_policy: Mapping[str, Any] | None = None,
     board_butler_project: str | None = None,
     board_butler_default_per_hour: int = 5,
     central_retention: Mapping[str, Any] | None = None,
@@ -397,6 +443,12 @@ def contract(
                 "status": "configurable",
                 "apply_mode": "hot-apply",
                 "endpoint": "/api/dispatch",
+                **dict(worker_model_policy or {
+                    "status": "unavailable",
+                    "reason": "Central worker model dispatch policy is not readable.",
+                    "source": "Central board dispatch policy",
+                    "values": {},
+                }),
             },
             "delivery": {
                 "status": "configurable",

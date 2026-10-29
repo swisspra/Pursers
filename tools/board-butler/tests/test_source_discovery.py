@@ -81,8 +81,13 @@ def test_onboarding_bootstraps_nonworking_identity_before_coordinator_join(monke
             self.agent_name = kwargs['agent_name']
         async def __aenter__(self):
             entered.append(self.kwargs)
-            if self.kwargs['role'] == 'coordinator':
-                raise PermissionError('principal is not a member')
+            if self.kwargs['create_board']:
+                calls.append(('board_onboard', {
+                    'role': self.kwargs['role'],
+                    'capabilities': self.kwargs['capabilities'],
+                    'allow_takeover': self.kwargs['allow_takeover'],
+                    'create_board': True,
+                }))
             return self
         async def __aexit__(self, *args): pass
         async def board_onboard(self, **kwargs):
@@ -93,12 +98,58 @@ def test_onboarding_bootstraps_nonworking_identity_before_coordinator_join(monke
     monkeypatch.setattr(pursers_client, 'BoardClient', Client)
     backend = butler.CentralBackend(SimpleNamespace(url='http://example.invalid/mcp',home_board='home',agent_name='butler'), 'unused')
     adapter = butler.CentralProjectRegistry(backend)
-    asyncio.run(adapter.ensure_board('new-board', 'work', 2))
+    asyncio.run(adapter.ensure_board(
+        'new-board', 'work', 2, {'1': ('deepseek-exact',)}
+    ))
     assert entered[0]['capabilities']['can_work'] is False
     assert entered[0]['capabilities']['can_review'] is False
+    assert entered[0]['role'] == 'coordinator'
+    assert entered[0]['create_board'] is True
     assert calls[0][1]['role'] == 'coordinator'
     assert calls[-1][1]['default_ticket_tier'] == 2
+    assert calls[-1][1]['worker_models_by_tier'] == {'1': ['deepseek-exact']}
     assert calls[-1][1]['offer_ttl_s'] == 240
+
+
+def test_existing_board_onboarding_retries_without_creator_intent(monkeypatch):
+    from types import SimpleNamespace
+    from test_source_intake import butler
+    from pursers_client import BoardClientError
+    import pursers_client
+
+    attempts = []
+
+    class Client:
+        def __init__(self, url, token, board, **kwargs):
+            self.kwargs = kwargs
+            self.agent_name = kwargs["agent_name"]
+
+        async def __aenter__(self):
+            attempts.append(self.kwargs["create_board"])
+            if self.kwargs["create_board"]:
+                raise BoardClientError(
+                    "Error executing tool board_onboard: create_board is allowed only for a genuinely fresh board"
+                )
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def board_onboard(self, **kwargs):
+            return {"ok": True}
+
+        async def _call(self, name, args):
+            if name == "board_status":
+                return {"dispatch_policy": {"default_ticket_tier": 2}}
+            raise AssertionError(f"unexpected call: {name}")
+
+    monkeypatch.setattr(pursers_client, "BoardClient", Client)
+    backend = butler.CentralBackend(
+        SimpleNamespace(url="http://example.invalid/mcp", home_board="home", agent_name="butler"),
+        "unused",
+    )
+    asyncio.run(butler.CentralProjectRegistry(backend).ensure_board("existing", "work", 2))
+    assert attempts == [True, False]
 
 
 def test_real_central_bootstrap_and_member_admission(tmp_path, monkeypatch):
@@ -123,11 +174,22 @@ def test_real_central_bootstrap_and_member_admission(tmp_path, monkeypatch):
             assert not result.is_error
             return result.structured_content
         async def board_onboard(self,**args):return await self._call('board_onboard',{'agent_name':self.agent_name,**args})
+        async def board_join(self,**args):return await self._call('board_join',{'agent_name':self.agent_name,**args})
     client=Client()
     @contextlib.asynccontextmanager
     async def factory(board,*,onboarding=False):
-        await client._call('board_join',{'agent_name':'butler','role':'worker' if onboarding else 'coordinator',
-                                        'capabilities':dict(butler.BOARD_BUTLER_CAPABILITIES),'allow_takeover':True})
+        # Mirror BoardClient: creator admission happens exactly once, when a
+        # fresh board is authorized, before policy reconciliation.
+        if onboarding and not service.board_exists(board):
+            await client.board_onboard(
+                role='coordinator', capabilities=dict(butler.BOARD_BUTLER_CAPABILITIES),
+                allow_takeover=True, create_board=True,
+            )
+        else:
+            await client.board_join(
+                role='coordinator', capabilities=dict(butler.BOARD_BUTLER_CAPABILITIES),
+                allow_takeover=True,
+            )
         yield client
     adapter=butler.CentralProjectRegistry(SimpleNamespace(_client_for_board=factory))
     async def run():
@@ -136,7 +198,9 @@ def test_real_central_bootstrap_and_member_admission(tmp_path, monkeypatch):
         result=await client._call('board_members',{})
         assert {m['principal_id']:m['role'] for m in result['members']}=={
             'PR-butler':'admin','PR-worker':'member','PR-reviewer':'reviewer','PR-intake':'member'}
-        assert (await client._call('board_status',{}))['dispatch_policy']['default_ticket_tier']==2
+        status = await client._call('board_status',{})
+        assert status['dispatch_policy']['default_ticket_tier']==2
+        assert status['dispatch_policy']['worker_models_by_tier']=={}
     asyncio.run(run())
 
 
