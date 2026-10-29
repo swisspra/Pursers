@@ -12,13 +12,13 @@
   "license": "Apache-2.0",
   "type": "module",
   "dependencies": {
-    "@modelcontextprotocol/client": "^2.2.0",
+    "@modelcontextprotocol/client": "^2.3.1",
     "@modelcontextprotocol/ext-apps": "^2.0.3",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "typescript": "^7.0.2",
-    "vite": "^8.3.2",
-    "vite-plugin-singlefile": "^2.3.3"
+    "vite": "^8.3.5",
+    "vite-plugin-singlefile": "^2.3.4"
   }
 }
